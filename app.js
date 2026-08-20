@@ -1,13 +1,13 @@
 "use strict";
 
 /* =========================================================
-   帳庭 (Chōtei) — vanilla-JS PWA edition
+   IslaFolio — vanilla-JS PWA edition
    ========================================================= */
 
-const LS_KEY = "chotei:data";
+const LS_KEY = "islafolio:data";
 
-const PALETTE = ["#2C5379", "#A63D3D", "#C08A2E", "#3F6B4F", "#6B4E71", "#8A6D3B", "#4A5568", "#7A4A3A"];
-const CATEGORY_PALETTE = ["#A63D3D", "#2C5379", "#C08A2E", "#3F6B4F", "#6B4E71", "#8A6D3B", "#B0724A", "#4A5568", "#7A8C99", "#9C5B5B"];
+const PALETTE = ["#4FBE8D", "#7FB3C4", "#D97757", "#5E93A6", "#8FA998", "#C9A66B", "#6B7FA3", "#4A8F7C"];
+const CATEGORY_PALETTE = ["#D97757", "#4FBE8D", "#7FB3C4", "#C9A66B", "#6B7FA3", "#8FA998", "#5E93A6", "#4A8F7C", "#B98A9A", "#8A9BA8"];
 const DEFAULT_EXPENSE_CATS = ["食費", "日用品", "光熱費", "通信費", "住居費", "交通費", "娯楽", "医療", "衣服", "交際費", "その他"];
 const DEFAULT_INCOME_CATS = ["給与", "副業", "お小遣い", "ボーナス", "贈与", "その他"];
 const MONTH_NAMES = ["1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月"];
@@ -60,6 +60,18 @@ function hashColor(str, arr) {
   for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
   return arr[h % arr.length];
 }
+function shadeColor(hex, percent) {
+  // percent negative = darker, positive = lighter
+  const n = hex.replace("#", "");
+  const num = parseInt(n, 16);
+  let r = (num >> 16) + Math.round(255 * (percent / 100));
+  let g = ((num >> 8) & 0x00ff) + Math.round(255 * (percent / 100));
+  let b = (num & 0x0000ff) + Math.round(255 * (percent / 100));
+  r = Math.max(0, Math.min(255, r));
+  g = Math.max(0, Math.min(255, g));
+  b = Math.max(0, Math.min(255, b));
+  return "#" + (0x1000000 + r * 0x10000 + g * 0x100 + b).toString(16).slice(1);
+}
 function escapeHtml(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -97,7 +109,7 @@ function loadData() {
     }
   } catch (e) { /* fall through to defaults */ }
   data.accounts = [
-    { id: uid(), name: "メイン銀行", type: "bank", initialBalance: 0, color: PALETTE[0] },
+    { id: uid(), name: "メイン銀行", type: "bank", initialBalance: 0, color: PALETTE[1] },
     { id: uid(), name: "財布", type: "wallet", initialBalance: 0, color: PALETTE[2] },
   ];
 }
@@ -203,7 +215,7 @@ function exportBackup() {
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url; a.download = `chotei-backup-${todayStr()}.json`;
+  a.href = url; a.download = `islafolio-backup-${todayStr()}.json`;
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
   ui.statusMsg = { type: "success", text: "バックアップファイルを書き出しました。" };
@@ -250,27 +262,27 @@ function composedChartSVG(stats) {
     const xIncome = cx - barW - 2, xExpense = cx + 2;
     const baseline = yRight(0);
     const yInc = yRight(s.income), yExp = yRight(s.expense);
-    bars += `<rect x="${xIncome.toFixed(1)}" y="${yInc.toFixed(1)}" width="${barW.toFixed(1)}" height="${(baseline - yInc).toFixed(1)}" fill="#2C5379" rx="2"/>`;
-    bars += `<rect x="${xExpense.toFixed(1)}" y="${yExp.toFixed(1)}" width="${barW.toFixed(1)}" height="${(baseline - yExp).toFixed(1)}" fill="#A63D3D" rx="2"/>`;
+    bars += `<rect x="${xIncome.toFixed(1)}" y="${yInc.toFixed(1)}" width="${barW.toFixed(1)}" height="${(baseline - yInc).toFixed(1)}" fill="#4FBE8D" rx="3"/>`;
+    bars += `<rect x="${xExpense.toFixed(1)}" y="${yExp.toFixed(1)}" width="${barW.toFixed(1)}" height="${(baseline - yExp).toFixed(1)}" fill="#D97757" rx="3"/>`;
     linePoints.push([cx, yLeft(s.net)]);
-    xlabels += `<text x="${cx.toFixed(1)}" y="${h - 8}" font-size="10" fill="#5B6472" text-anchor="middle">${s.label}</text>`;
+    xlabels += `<text x="${cx.toFixed(1)}" y="${h - 8}" font-size="10" fill="#5D7688" text-anchor="middle">${s.label}</text>`;
   });
   const linePath = linePoints.map((p, i) => (i === 0 ? "M" : "L") + p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");
   let grid = "";
-  for (let i = 0; i <= 4; i++) { const y = padT + (plotH / 4) * i; grid += `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="#DCD2B8" stroke-width="1"/>`; }
+  for (let i = 0; i <= 4; i++) { const y = padT + (plotH / 4) * i; grid += `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="#DCE7E9" stroke-width="1"/>`; }
   const leftLabels = `
-    <text x="${padL - 8}" y="${yLeft(maxLeftAbs) + 4}" font-size="10" fill="#C08A2E" text-anchor="end">${formatYenShort(maxLeftAbs)}</text>
-    <text x="${padL - 8}" y="${yLeft(0) + 4}" font-size="10" fill="#C08A2E" text-anchor="end">0</text>
-    <text x="${padL - 8}" y="${yLeft(-maxLeftAbs) + 4}" font-size="10" fill="#C08A2E" text-anchor="end">-${formatYenShort(maxLeftAbs)}</text>`;
+    <text x="${padL - 8}" y="${yLeft(maxLeftAbs) + 4}" font-size="10" fill="#16324F" text-anchor="end">${formatYenShort(maxLeftAbs)}</text>
+    <text x="${padL - 8}" y="${yLeft(0) + 4}" font-size="10" fill="#16324F" text-anchor="end">0</text>
+    <text x="${padL - 8}" y="${yLeft(-maxLeftAbs) + 4}" font-size="10" fill="#16324F" text-anchor="end">-${formatYenShort(maxLeftAbs)}</text>`;
   const rightLabels = `
-    <text x="${w - padR + 8}" y="${yRight(maxRight) + 4}" font-size="10" fill="#5B6472">${formatYenShort(maxRight)}</text>
-    <text x="${w - padR + 8}" y="${yRight(0) + 4}" font-size="10" fill="#5B6472">0</text>`;
+    <text x="${w - padR + 8}" y="${yRight(maxRight) + 4}" font-size="10" fill="#5D7688">${formatYenShort(maxRight)}</text>
+    <text x="${w - padR + 8}" y="${yRight(0) + 4}" font-size="10" fill="#5D7688">0</text>`;
   return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;display:block;">
     ${grid}
-    <line x1="${padL}" y1="${yLeft(0)}" x2="${w - padR}" y2="${yLeft(0)}" stroke="#5B6472" stroke-dasharray="4 4"/>
+    <line x1="${padL}" y1="${yLeft(0)}" x2="${w - padR}" y2="${yLeft(0)}" stroke="#5D7688" stroke-dasharray="4 4"/>
     ${bars}
-    <path d="${linePath}" fill="none" stroke="#C08A2E" stroke-width="2.75"/>
-    ${linePoints.map((p) => `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="#C08A2E"/>`).join("")}
+    <path d="${linePath}" fill="none" stroke="#16324F" stroke-width="2.75"/>
+    ${linePoints.map((p) => `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="#16324F"/>`).join("")}
     ${xlabels}${leftLabels}${rightLabels}
   </svg>`;
 }
@@ -283,12 +295,12 @@ function categoryBarChartSVG(series, color) {
   let bars = "", xlabels = "";
   series.forEach((s, i) => {
     const cx = padL + groupW * i + groupW / 2, x = cx - barW / 2, yy = y(s.amount);
-    bars += `<rect x="${x.toFixed(1)}" y="${yy.toFixed(1)}" width="${barW.toFixed(1)}" height="${(padT + plotH - yy).toFixed(1)}" fill="${color}" rx="2"/>`;
-    xlabels += `<text x="${cx.toFixed(1)}" y="${h - 8}" font-size="10" fill="#5B6472" text-anchor="middle">${s.label}</text>`;
+    bars += `<rect x="${x.toFixed(1)}" y="${yy.toFixed(1)}" width="${barW.toFixed(1)}" height="${(padT + plotH - yy).toFixed(1)}" fill="${color}" rx="3"/>`;
+    xlabels += `<text x="${cx.toFixed(1)}" y="${h - 8}" font-size="10" fill="#5D7688" text-anchor="middle">${s.label}</text>`;
   });
   let grid = "";
-  for (let i = 0; i <= 4; i++) { const yy = padT + (plotH / 4) * i; grid += `<line x1="${padL}" y1="${yy}" x2="${w - padR}" y2="${yy}" stroke="#DCD2B8" stroke-width="1"/>`; }
-  const maxLabel = `<text x="${padL - 8}" y="${padT + 4}" font-size="10" fill="#5B6472" text-anchor="end">${formatYenShort(max)}</text>`;
+  for (let i = 0; i <= 4; i++) { const yy = padT + (plotH / 4) * i; grid += `<line x1="${padL}" y1="${yy}" x2="${w - padR}" y2="${yy}" stroke="#DCE7E9" stroke-width="1"/>`; }
+  const maxLabel = `<text x="${padL - 8}" y="${padT + 4}" font-size="10" fill="#5D7688" text-anchor="end">${formatYenShort(max)}</text>`;
   return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;display:block;">${grid}${bars}${xlabels}${maxLabel}</svg>`;
 }
 
@@ -296,9 +308,15 @@ function categoryBarChartSVG(series, color) {
 function renderHeader() {
   return `
     <div class="kb-header">
-      <div class="kb-title"><span class="tab">帳</span><span class="kb-display">帳庭 — 家計の庭</span></div>
+      <div class="kb-title">
+        <div class="kb-logo-mark"></div>
+        <div class="kb-title-text">
+          <span class="brand logo-font">IslaFolio</span>
+          <span class="tagline">資産の島々</span>
+        </div>
+      </div>
       <div class="kb-netbadge">
-        <div class="kb-stamp">総資産</div>
+        <div class="kb-net-dot"></div>
         <div><div class="kb-netlabel">純資産合計</div><div class="kb-netvalue kb-num">${formatYen(netWorth())}</div></div>
       </div>
     </div>`;
@@ -306,37 +324,38 @@ function renderHeader() {
 
 /* ---------- render: home tab ---------- */
 function renderHomeTab() {
-  const accountsHtml = data.accounts.map((acc) => {
+  const islandsHtml = data.accounts.map((acc) => {
     const meta = TYPE_META[acc.type] || TYPE_META.bank;
+    const deep = shadeColor(acc.color, -16);
     return `
-      <div class="kb-account" data-reorder-item="account" data-id="${acc.id}" style="--acc-color:${acc.color}">
-        <div class="kb-account-top" data-reorder-handle>
-          <div class="kb-account-name">
-            <span class="kb-account-icon">${icon(meta.icon, 14)}</span>
-            ${escapeHtml(acc.name)}
-            <span class="kb-account-type">${meta.label}</span>
-          </div>
-          ${icon("grip", 16).replace('class="icon"', 'class="icon kb-grip"')}
+      <div class="kb-island" data-reorder-item="account" data-id="${acc.id}" style="--island-color:${acc.color};--island-color-deep:${deep}">
+        <div class="kb-island-top" data-reorder-handle>
+          <span class="kb-island-icon">${icon(meta.icon, 14)}</span>
+          ${icon("grip", 15).replace('class="icon"', 'class="icon kb-island-grip"')}
         </div>
-        <div class="kb-account-balance kb-num">${formatYen(getAccountBalance(acc.id))}</div>
-        <div class="kb-account-actions">
-          <button class="kb-mini-btn" onclick="C.openTxModal('income', '${acc.id}')">${icon("arrowDown", 13)} 入金</button>
-          <button class="kb-mini-btn" onclick="C.openTxModal('transfer', '${acc.id}')">${icon("transfer", 13)} 移動</button>
-          <button class="kb-mini-btn" onclick="C.openTxModal('expense', '${acc.id}')">${icon("arrowUp", 13)} 使用</button>
+        <div>
+          <div class="kb-island-name">${escapeHtml(acc.name)}</div>
+          <span class="kb-island-type">${meta.label}</span>
+          <div class="kb-island-balance kb-num">${formatYen(getAccountBalance(acc.id))}</div>
+        </div>
+        <div class="kb-island-actions">
+          <button class="kb-island-mini-btn" title="入金" onclick="C.openTxModal('income', '${acc.id}')">${icon("arrowDown", 14)}</button>
+          <button class="kb-island-mini-btn" title="移動" onclick="C.openTxModal('transfer', '${acc.id}')">${icon("transfer", 14)}</button>
+          <button class="kb-island-mini-btn" title="使用" onclick="C.openTxModal('expense', '${acc.id}')">${icon("arrowUp", 14)}</button>
         </div>
       </div>`;
   }).join("");
 
-  const cardsHtml = data.cards.map((c) => {
+  const docksHtml = data.cards.map((c) => {
     const acc = getAccount(c.linkedAccountId);
     return `
-      <div class="kb-card-chip" data-reorder-item="card" data-id="${c.id}" data-reorder-handle style="--acc-color:${c.color}">
-        <span class="kb-card-icon">${icon("card", 13)}</span>
-        <div class="kb-card-body">
-          <div>${escapeHtml(c.name)}</div>
-          <div class="kb-card-sub">支払元：${escapeHtml(acc ? acc.name : "未設定")}</div>
+      <div class="kb-dock" data-reorder-item="card" data-id="${c.id}" data-reorder-handle style="--dock-color:${c.color}">
+        <div class="kb-dock-top">
+          <span class="kb-dock-icon">${icon("card", 13)}</span>
+          <span class="kb-dock-name">${escapeHtml(c.name)}</span>
+          ${icon("grip", 15).replace('class="icon"', 'class="icon kb-dock-grip"')}
         </div>
-        ${icon("grip", 16).replace('class="icon"', 'class="icon kb-grip"')}
+        <div class="kb-dock-sub">支払元：${escapeHtml(acc ? acc.name : "未設定")}</div>
       </div>`;
   }).join("");
 
@@ -348,18 +367,20 @@ function renderHomeTab() {
         <button class="kb-big-btn transfer" onclick="C.openTxModal('transfer')">${icon("transfer", 20)} 移動</button>
       </div>
     </div>
-    <div class="kb-two-col">
-      <div class="kb-panel" style="margin-bottom:0">
-        <div class="kb-panel-title"><span class="vtab">資産</span><h2>口座・貯蓄場所</h2></div>
-        ${data.accounts.length > 1 ? `<div class="kb-hint">名前の部分を長押しすると並び替えできます</div>` : ""}
-        ${data.accounts.length === 0 ? `<div class="kb-empty">まだ口座がありません</div>` : accountsHtml}
-        <button class="kb-add-btn" onclick="C.openAccountModal()">${icon("plus", 14)} 口座・貯蓄場所を追加</button>
+    <div class="kb-panel">
+      <div class="kb-panel-title"><span class="kb-panel-icon">${icon("bank", 15)}</span><h2>資金源の島々</h2></div>
+      ${data.accounts.length > 1 ? `<div class="kb-hint">島を長押しすると並び替えできます</div>` : ""}
+      <div class="kb-island-grid">
+        ${islandsHtml}
+        <button class="kb-add-island" onclick="C.openAccountModal()">${icon("plus", 20)}<span>島を追加</span></button>
       </div>
-      <div class="kb-panel" style="margin-bottom:0">
-        <div class="kb-panel-title"><span class="vtab" style="background:var(--gold)">札</span><h2>カード</h2></div>
-        ${data.cards.length > 1 ? `<div class="kb-hint">長押しすると並び替えできます</div>` : ""}
-        ${data.cards.length === 0 ? `<div class="kb-empty">まだカードがありません</div>` : cardsHtml}
-        <button class="kb-add-btn" ${data.accounts.length === 0 ? "disabled" : ""} onclick="C.openCardModal()">${icon("plus", 14)} カードを追加</button>
+    </div>
+    <div class="kb-panel" style="margin-bottom:0">
+      <div class="kb-panel-title"><span class="kb-panel-icon navy">${icon("card", 15)}</span><h2>カード</h2></div>
+      ${data.cards.length > 1 ? `<div class="kb-hint">長押しすると並び替えできます</div>` : ""}
+      <div class="kb-dock-grid">
+        ${docksHtml}
+        <button class="kb-add-island" style="min-height:auto;padding:20px 0" ${data.accounts.length === 0 ? "disabled" : ""} onclick="C.openCardModal()">${icon("plus", 18)}<span>カードを追加</span></button>
       </div>
     </div>`;
 }
@@ -378,9 +399,9 @@ function renderRecordTab() {
          <div class="kb-chart-label">左目盛り：収支（折れ線）／ 右目盛り：入金・出費（棒） — ${ui.recordYear}年</div>
          ${composedChartSVG(stats)}
          <div class="kb-chart-legend">
-           <span><i class="kb-legend-dot" style="background:#2C5379"></i>入金</span>
-           <span><i class="kb-legend-dot" style="background:#A63D3D"></i>出費</span>
-           <span><i class="kb-legend-dot" style="background:#C08A2E"></i>収支（左目盛り）</span>
+           <span><i class="kb-legend-dot" style="background:#4FBE8D"></i>入金</span>
+           <span><i class="kb-legend-dot" style="background:#D97757"></i>出費</span>
+           <span><i class="kb-legend-dot" style="background:#16324F"></i>収支（左目盛り）</span>
          </div>
        </div>`
     : `<div class="kb-chart-box">
@@ -392,7 +413,7 @@ function renderRecordTab() {
     <div class="kb-txlist">
       ${tx.map((t) => `
         <div class="kb-tx-row">
-          <div class="kb-tx-mark" style="background:${t.type === "expense" ? "var(--seal)" : t.type === "income" ? "var(--indigo)" : "var(--gold)"}"></div>
+          <div class="kb-tx-mark" style="background:${t.type === "expense" ? "var(--coral)" : t.type === "income" ? "var(--mint)" : "var(--wash)"}"></div>
           <div class="kb-tx-date">${t.date.slice(5).replace("-", "/")}</div>
           <div class="kb-tx-mid">
             <div class="kb-tx-memo">
@@ -401,7 +422,7 @@ function renderRecordTab() {
             </div>
             <div class="kb-tx-sub">${escapeHtml(sourceLabel(t))}</div>
           </div>
-          <div class="kb-tx-amt kb-num" style="color:${t.type === "expense" ? "var(--seal)" : t.type === "income" ? "var(--indigo)" : "var(--ink-soft)"}">
+          <div class="kb-tx-amt kb-num" style="color:${t.type === "expense" ? "var(--coral)" : t.type === "income" ? "var(--mint-deep)" : "var(--ink-soft)"}">
             ${t.type === "expense" ? "−" : t.type === "income" ? "+" : ""}${formatYen(t.amount)}
           </div>
           <button class="kb-tx-del" onclick="C.deleteTx('${t.id}')" title="削除">${icon("trash", 14)}</button>
@@ -410,7 +431,7 @@ function renderRecordTab() {
 
   return `
     <div class="kb-panel">
-      <div class="kb-panel-title"><span class="vtab">図</span><h2>グラフ</h2></div>
+      <div class="kb-panel-title"><span class="kb-panel-icon">${icon("book", 15)}</span><h2>グラフ</h2></div>
       <div class="kb-toolbar">
         <select class="kb-select" onchange="C.setRecordYear(this.value)">
           ${years.map((y) => `<option value="${y}" ${y === ui.recordYear ? "selected" : ""}>${y}年</option>`).join("")}
@@ -427,7 +448,7 @@ function renderRecordTab() {
       ${chartBlock}
     </div>
     <div class="kb-panel" style="margin-bottom:0">
-      <div class="kb-panel-title"><span class="vtab" style="background:var(--ink)">録</span><h2>入出金履歴</h2></div>
+      <div class="kb-panel-title"><span class="kb-panel-icon navy">${icon("transfer", 15)}</span><h2>入出金履歴</h2></div>
       ${txHtml}
     </div>`;
 }
@@ -443,7 +464,7 @@ function renderOtherTab() {
 
   return `
     <div class="kb-panel">
-      <div class="kb-panel-title"><span class="vtab">分</span><h2>支出の種類を管理</h2></div>
+      <div class="kb-panel-title"><span class="kb-panel-icon coral">${icon("arrowUp", 15)}</span><h2>支出の種類を管理</h2></div>
       ${data.expenseCats.map((c) => catRow("expense", c)).join("")}
       <div class="kb-inline-add">
         <input type="text" id="newExpenseCat" placeholder="新しい種類を追加" />
@@ -451,7 +472,7 @@ function renderOtherTab() {
       </div>
     </div>
     <div class="kb-panel">
-      <div class="kb-panel-title"><span class="vtab" style="background:var(--gold)">分</span><h2>収入の種類を管理</h2></div>
+      <div class="kb-panel-title"><span class="kb-panel-icon">${icon("arrowDown", 15)}</span><h2>収入の種類を管理</h2></div>
       ${data.incomeCats.map((c) => catRow("income", c)).join("")}
       <div class="kb-inline-add">
         <input type="text" id="newIncomeCat" placeholder="新しい種類を追加" />
@@ -459,7 +480,7 @@ function renderOtherTab() {
       </div>
     </div>
     <div class="kb-panel">
-      <div class="kb-panel-title"><span class="vtab" style="background:var(--seal)">設</span><h2>データ管理</h2></div>
+      <div class="kb-panel-title"><span class="kb-panel-icon navy">${icon("settings", 15)}</span><h2>データ管理</h2></div>
       ${statusHtml}
       <p style="font-size:13px;color:var(--ink-soft);margin-top:0">他の端末にデータを持っていくときは、バックアップを書き出してファイルを送り、もう一方の端末で読み込んでください。</p>
       <div class="kb-btn-row">
@@ -471,9 +492,10 @@ function renderOtherTab() {
       <button class="kb-danger-btn" onclick="C.confirmReset()">すべてのデータをリセット</button>
     </div>
     <div class="kb-panel" style="margin-bottom:0">
-      <div class="kb-panel-title"><span class="vtab" style="background:var(--indigo)">証</span><h2>クレジット</h2></div>
+      <div class="kb-panel-title"><span class="kb-panel-icon">${icon("bank", 15)}</span><h2>クレジット</h2></div>
       <div class="kb-credits">
-        <div><b>帳庭 — 家計の庭</b>（個人利用向け家計簿アプリ）</div>
+        <div><b>IslaFolio</b>（個人利用向け家計簿アプリ）</div>
+        <div>資金源やカードを「島」として管理します。</div>
         <div>PWA版：ブラウザのローカルストレージにデータを保存します。</div>
         <div>データを端末間で共有する場合は、上のバックアップ機能をご利用ください。</div>
       </div>
@@ -502,8 +524,8 @@ function renderApp() {
   if (ui.activeTab === "home") setupReorder();
 }
 
-/* ---------- long-press reorder ---------- */
-let dragSession = { id: null, kind: null, timer: null, active: false, startY: 0 };
+/* ---------- long-press grid reorder (2D: for both list and grid layouts) ---------- */
+let dragSession = { id: null, kind: null, timer: null, active: false, startX: 0, startY: 0 };
 function setupReorder() {
   document.querySelectorAll("[data-reorder-item]").forEach((row) => {
     const handle = row.querySelector("[data-reorder-handle]") || row;
@@ -511,7 +533,7 @@ function setupReorder() {
   });
 }
 function startDrag(e, id, kind) {
-  dragSession = { id, kind, timer: null, active: false, startY: e.clientY };
+  dragSession = { id, kind, timer: null, active: false, startX: e.clientX, startY: e.clientY };
   window.addEventListener("pointermove", onDragMove, { passive: false });
   window.addEventListener("pointerup", onDragUp);
   dragSession.timer = setTimeout(() => {
@@ -524,27 +546,38 @@ function startDrag(e, id, kind) {
 function onDragMove(e) {
   if (!dragSession.id) return;
   if (!dragSession.active) {
-    if (Math.abs(e.clientY - dragSession.startY) > 10) cancelDrag();
+    if (Math.abs(e.clientX - dragSession.startX) > 10 || Math.abs(e.clientY - dragSession.startY) > 10) cancelDrag();
     return;
   }
   e.preventDefault();
   const el = document.querySelector(`[data-reorder-item="${dragSession.kind}"][data-id="${dragSession.id}"]`);
   if (!el) return;
-  const delta = e.clientY - dragSession.startY;
-  el.style.transform = `translateY(${delta}px)`;
-  const h = el.offsetHeight + 10;
-  if (Math.abs(delta) >= h) {
+  const dx = e.clientX - dragSession.startX, dy = e.clientY - dragSession.startY;
+  el.style.transform = `translate(${dx}px, ${dy}px)`;
+
+  const siblings = Array.from(document.querySelectorAll(`[data-reorder-item="${dragSession.kind}"]`));
+  let closest = null, closestDist = Infinity;
+  siblings.forEach((sib) => {
+    if (sib === el) return;
+    const r = sib.getBoundingClientRect();
+    const d = Math.hypot(e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2));
+    if (d < closestDist) { closestDist = d; closest = sib; }
+  });
+  if (closest && closestDist < 90) {
     const arr = dragSession.kind === "account" ? data.accounts : data.cards;
     const idx = arr.findIndex((x) => x.id === dragSession.id);
-    const newIdx = Math.max(0, Math.min(arr.length - 1, idx + (delta > 0 ? 1 : -1)));
-    if (newIdx !== idx) {
+    const targetIdx = arr.findIndex((x) => x.id === closest.dataset.id);
+    if (idx !== -1 && targetIdx !== -1 && idx !== targetIdx) {
       const [moved] = arr.splice(idx, 1);
-      arr.splice(newIdx, 0, moved);
+      arr.splice(targetIdx, 0, moved);
       saveState();
-      dragSession.startY = e.clientY;
       renderApp();
       const el2 = document.querySelector(`[data-reorder-item="${dragSession.kind}"][data-id="${dragSession.id}"]`);
-      if (el2) el2.classList.add("kb-dragging");
+      if (el2) {
+        el2.classList.add("kb-dragging");
+        el2.style.transform = "translate(0px,0px)";
+      }
+      dragSession.startX = e.clientX; dragSession.startY = e.clientY;
     }
   }
 }
@@ -557,7 +590,7 @@ function cancelDrag() {
     const el = document.querySelector(`[data-reorder-item="${dragSession.kind}"][data-id="${dragSession.id}"]`);
     if (el) { el.classList.remove("kb-dragging"); el.style.transform = ""; }
   }
-  dragSession = { id: null, kind: null, timer: null, active: false, startY: 0 };
+  dragSession = { id: null, kind: null, timer: null, active: false, startX: 0, startY: 0 };
 }
 
 /* ---------- modals ---------- */
@@ -580,11 +613,11 @@ function openConfirmModal(message, onConfirm) {
     <div class="kb-modal-backdrop">
       <div class="kb-modal" style="max-width:340px" onclick="event.stopPropagation()">
         <button class="kb-modal-close" onclick="C.closeModal()">${icon("x", 18)}</button>
-        <h3 style="color:var(--seal)">確認</h3>
+        <h3 style="color:var(--coral)">確認</h3>
         <p style="font-size:13.5px;line-height:1.7;margin-top:0">${escapeHtml(message)}</p>
         <div style="display:flex;gap:8px;margin-top:12px">
           <button class="kb-outline-btn" style="flex:1;justify-content:center" onclick="C.closeModal()">キャンセル</button>
-          <button class="kb-submit" style="flex:1;margin-top:0;background:var(--seal)" id="confirmModalOkBtn">実行する</button>
+          <button class="kb-submit" style="flex:1;margin-top:0;background:var(--coral)" id="confirmModalOkBtn">実行する</button>
         </div>
       </div>
     </div>`);
@@ -604,7 +637,7 @@ function openAccountModal() {
     <div class="kb-modal-backdrop">
       <div class="kb-modal" onclick="event.stopPropagation()">
         <button class="kb-modal-close" onclick="C.closeModal()">${icon("x", 18)}</button>
-        <h3>口座・貯蓄場所を追加</h3>
+        <h3>島を追加</h3>
         <div class="kb-field"><label>名前</label><input type="text" id="accName" placeholder="例：〇〇銀行、財布、貯金箱" /></div>
         <div class="kb-field"><label>種類</label><div class="kb-chip-group" id="accTypeGroup">${typeChip()}</div></div>
         <div class="kb-field"><label>現在の残高</label><input type="number" id="accBalance" placeholder="0" /></div>
@@ -666,7 +699,7 @@ function openCardModal() {
 }
 
 function openTxModal(mode, presetAccountId) {
-  const accentMap = { expense: "var(--seal)", income: "var(--indigo)", transfer: "var(--gold)" };
+  const accentMap = { expense: "var(--coral)", income: "var(--mint-deep)", transfer: "var(--wash)" };
   const titleMap = { expense: "出費を記録", income: "入金を記録", transfer: "資金移動" };
   let category = "";
   let sourceType = "account";

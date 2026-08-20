@@ -1,13 +1,13 @@
 {
-  "name": "帳庭 — 家計の庭",
-  "short_name": "帳庭",
-  "description": "口座・カードを横断して管理する家計簿アプリ",
+  "name": "IslaFolio",
+  "short_name": "IslaFolio",
+  "description": "資金源やカードを島として自由に配置できる家計簿アプリ",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait-primary",
-  "background_color": "#F2EDDF",
-  "theme_color": "#1E2A38",
+  "background_color": "#F3F8F7",
+  "theme_color": "#16324F",
   "icons": [
     { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
