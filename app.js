@@ -17,7 +17,7 @@ const MONTH_NAMES = ["1月","2月","3月","4月","5月","6月","7月","8月","9�
    下の値を書き換えてください。
 --------------------------------------------------*/
 const CONFIG = {
-  GOOGLE_CLIENT_ID: "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+  GOOGLE_CLIENT_ID: "983014776265-5bkndcmmaijm61ieedjf43de6a8hccq6.apps.googleusercontent.com",
 };
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
 const DRIVE_FILE_NAME = "islafolio-data.json";
