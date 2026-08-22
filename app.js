@@ -11,6 +11,18 @@ const CATEGORY_PALETTE = ["#D97757", "#4FBE8D", "#7FB3C4", "#C9A66B", "#6B7FA3",
 const DEFAULT_EXPENSE_CATS = ["食費", "日用品", "光熱費", "通信費", "住居費", "交通費", "娯楽", "医療", "衣服", "交際費", "その他"];
 const DEFAULT_INCOME_CATS = ["給与", "副業", "お小遣い", "ボーナス", "贈与", "その他"];
 const MONTH_NAMES = ["1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月"];
+
+/* ---------- Google Drive sync config ----------
+   READMEの手順でGoogle Cloud ConsoleからOAuthクライアントIDを取得し、
+   下の値を書き換えてください。
+--------------------------------------------------*/
+const CONFIG = {
+  GOOGLE_CLIENT_ID: "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+};
+const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
+const DRIVE_FILE_NAME = "islafolio-data.json";
+const DRIVE_CONNECTED_KEY = "islafolio:drive_connected";
+const DRIVE_AUTOSYNC_KEY = "islafolio:drive_autosync";
 const TYPE_META = {
   bank:    { label: "銀行",   icon: "bank" },
   wallet:  { label: "手持ち", icon: "wallet" },
@@ -35,6 +47,11 @@ const ICONS = {
   wallet: '<rect x="2" y="6" width="20" height="14" rx="2"/><path d="M2 10h20"/><circle cx="17" cy="14.5" r="1.1"/>',
   piggy: '<path d="M4 12a5 5 0 0 1 5-5h6a5 5 0 0 1 5 5v1a2 2 0 0 1-2 2h-1v2h-3v-2H9v2H6v-2H5a1 1 0 0 1-1-1z"/><circle cx="16" cy="10" r="0.6"/><path d="M2 12h2"/><path d="M20 9l2-1"/>',
   card: '<rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/>',
+  calendar: '<rect x="3" y="4" width="18" height="18" rx="3"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
+  compass: '<circle cx="12" cy="12" r="9"/><polygon points="15.5 8.5 13.2 13.2 8.5 15.5 10.8 10.8 15.5 8.5"/>',
+  cloud: '<path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.6 1.5A4 4 0 0 0 6 19h11.5z"/>',
+  cloudOff: '<path d="M17.5 19a4.5 4.5 0 0 0 .5-8.97"/><path d="M9.2 5.2A6 6 0 0 1 17.9 10.5"/><path d="M5.6 8A4 4 0 0 0 6 19h9.5"/><line x1="2" y1="2" x2="22" y2="22"/>',
+  check: '<polyline points="20 6 9 17 4 12"/>',
 };
 function icon(name, size) {
   size = size || 16;
@@ -83,6 +100,7 @@ let data = {
   transactions: [],
   expenseCats: DEFAULT_EXPENSE_CATS.slice(),
   incomeCats: DEFAULT_INCOME_CATS.slice(),
+  recurringExpenses: [],
 };
 
 /* ---------- transient UI state ---------- */
@@ -93,7 +111,21 @@ let ui = {
   catViewType: "expense",
   catViewCategory: "",
   statusMsg: null,
+  driveStatusMsg: null,
+  projectionMonth: "",
 };
+
+/* ---------- Google Drive sync state (not persisted in data payload) ---------- */
+let drive = {
+  gisReady: false,
+  tokenClient: null,
+  token: null,
+  connected: false,
+  busy: false,
+  lastSync: null,
+  autoSync: localStorage.getItem(DRIVE_AUTOSYNC_KEY) !== "0",
+};
+let driveAutoSyncTimer = null;
 
 function loadData() {
   try {
@@ -105,6 +137,7 @@ function loadData() {
       data.transactions = parsed.transactions || [];
       data.expenseCats = parsed.expenseCats || DEFAULT_EXPENSE_CATS.slice();
       data.incomeCats = parsed.incomeCats || DEFAULT_INCOME_CATS.slice();
+      data.recurringExpenses = parsed.recurringExpenses || [];
       return;
     }
   } catch (e) { /* fall through to defaults */ }
@@ -115,6 +148,176 @@ function loadData() {
 }
 function saveState() {
   try { localStorage.setItem(LS_KEY, JSON.stringify(data)); } catch (e) { /* storage full/unavailable */ }
+  scheduleDriveAutoSync();
+}
+
+/* ---------- Google Drive sync ---------- */
+function driveConfigured() {
+  return !!(CONFIG.GOOGLE_CLIENT_ID && CONFIG.GOOGLE_CLIENT_ID.indexOf("YOUR_GOOGLE_OAUTH_CLIENT_ID") === -1);
+}
+function onGisReady() {
+  drive.gisReady = true;
+  if (!driveConfigured()) return;
+  initGoogleClient();
+  if (localStorage.getItem(DRIVE_CONNECTED_KEY) === "1") connectDrive(false);
+}
+window.onGisReady = onGisReady;
+
+function initGoogleClient() {
+  if (drive.tokenClient || !window.google || !google.accounts || !google.accounts.oauth2) return;
+  drive.tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: CONFIG.GOOGLE_CLIENT_ID,
+    scope: DRIVE_SCOPE,
+    callback: (resp) => {
+      drive.busy = false;
+      if (resp && resp.access_token) {
+        drive.token = resp.access_token;
+        drive.connected = true;
+        localStorage.setItem(DRIVE_CONNECTED_KEY, "1");
+        handleDriveConnected();
+      } else {
+        ui.driveStatusMsg = { type: "error", text: "Googleへのログインに失敗しました。" };
+        renderApp();
+      }
+    },
+    error_callback: () => {
+      drive.busy = false;
+      ui.driveStatusMsg = { type: "error", text: "Googleへのログインがキャンセルされました。" };
+      renderApp();
+    },
+  });
+}
+function connectDrive(interactive) {
+  if (!driveConfigured()) {
+    ui.driveStatusMsg = { type: "error", text: "READMEの手順でGoogle Cloud ConsoleのクライアントIDを設定してください。" };
+    renderApp();
+    return;
+  }
+  if (!drive.tokenClient) initGoogleClient();
+  if (!drive.tokenClient) {
+    ui.driveStatusMsg = { type: "error", text: "Googleログイン機能の読み込みに失敗しました。しばらくしてから再度お試しください。" };
+    renderApp();
+    return;
+  }
+  drive.busy = true;
+  renderApp();
+  drive.tokenClient.requestAccessToken({ prompt: interactive ? "consent" : "" });
+}
+function disconnectDrive() {
+  if (drive.token && window.google && google.accounts && google.accounts.oauth2) {
+    google.accounts.oauth2.revoke(drive.token, () => {});
+  }
+  drive.token = null;
+  drive.connected = false;
+  drive.lastSync = null;
+  localStorage.removeItem(DRIVE_CONNECTED_KEY);
+  ui.driveStatusMsg = { type: "success", text: "Google Driveとの連携を解除しました。" };
+  renderApp();
+}
+async function handleDriveConnected() {
+  ui.driveStatusMsg = { type: "success", text: "Google Driveに接続しました。最新データを取得しています…" };
+  renderApp();
+  try {
+    const remote = await driveDownload();
+    if (remote) {
+      applyRemoteData(remote);
+      ui.driveStatusMsg = { type: "success", text: "Driveの最新データを取得しました。" };
+    } else {
+      ui.driveStatusMsg = { type: "success", text: "接続しました（Drive上にはまだバックアップがありません）。" };
+    }
+    drive.lastSync = new Date().toISOString();
+  } catch (e) {
+    ui.driveStatusMsg = { type: "error", text: "Driveからの取得に失敗しました。" };
+  }
+  renderApp();
+}
+async function driveApiFetch(url, options) {
+  options = options || {};
+  options.headers = Object.assign({}, options.headers, { Authorization: `Bearer ${drive.token}` });
+  const res = await fetch(url, options);
+  if (!res.ok) throw new Error("drive_api_error_" + res.status);
+  return res;
+}
+async function driveFindFile() {
+  const q = encodeURIComponent(`name='${DRIVE_FILE_NAME}' and trashed=false`);
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}&fields=files(id,name,modifiedTime)`);
+  const json = await res.json();
+  return (json.files && json.files[0]) || null;
+}
+async function driveUpload() {
+  const payload = JSON.stringify({
+    accounts: data.accounts, cards: data.cards, transactions: data.transactions,
+    expenseCats: data.expenseCats, incomeCats: data.incomeCats, recurringExpenses: data.recurringExpenses,
+    syncedAt: new Date().toISOString(),
+  });
+  const existing = await driveFindFile();
+  if (existing) {
+    await driveApiFetch(`https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=media`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: payload,
+    });
+  } else {
+    const boundary = "islafolio_boundary_xyz";
+    const metadata = { name: DRIVE_FILE_NAME, parents: ["appDataFolder"] };
+    const body =
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\nContent-Type: application/json\r\n\r\n${payload}\r\n--${boundary}--`;
+    await driveApiFetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
+      method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body,
+    });
+  }
+}
+async function driveDownload() {
+  const existing = await driveFindFile();
+  if (!existing) return null;
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${existing.id}?alt=media`);
+  return await res.json();
+}
+function applyRemoteData(remote) {
+  data.accounts = remote.accounts || [];
+  data.cards = remote.cards || [];
+  data.transactions = remote.transactions || [];
+  data.expenseCats = remote.expenseCats || DEFAULT_EXPENSE_CATS.slice();
+  data.incomeCats = remote.incomeCats || DEFAULT_INCOME_CATS.slice();
+  data.recurringExpenses = remote.recurringExpenses || [];
+  try { localStorage.setItem(LS_KEY, JSON.stringify(data)); } catch (e) { /* ignore */ }
+}
+function scheduleDriveAutoSync() {
+  if (!drive.autoSync || !drive.connected || drive.token == null) return;
+  clearTimeout(driveAutoSyncTimer);
+  driveAutoSyncTimer = setTimeout(() => {
+    drive.busy = true;
+    driveUpload()
+      .then(() => { drive.lastSync = new Date().toISOString(); drive.busy = false; renderApp(); })
+      .catch(() => { drive.busy = false; ui.driveStatusMsg = { type: "error", text: "自動保存に失敗しました。時間をおいて再度お試しください。" }; renderApp(); });
+  }, 4000);
+}
+function manualDriveUpload() {
+  if (!drive.connected) return;
+  drive.busy = true; renderApp();
+  driveUpload()
+    .then(() => { drive.lastSync = new Date().toISOString(); drive.busy = false; ui.driveStatusMsg = { type: "success", text: "Driveに保存しました。" }; renderApp(); })
+    .catch(() => { drive.busy = false; ui.driveStatusMsg = { type: "error", text: "Driveへの保存に失敗しました。" }; renderApp(); });
+}
+function manualDriveDownload() {
+  if (!drive.connected) return;
+  openConfirmModal("Driveの最新データを取得します。現在この端末にあるデータは上書きされます。よろしいですか？", () => {
+    drive.busy = true; renderApp();
+    driveDownload()
+      .then((remote) => {
+        drive.busy = false;
+        if (remote) { applyRemoteData(remote); ui.driveStatusMsg = { type: "success", text: "Driveから復元しました。" }; }
+        else { ui.driveStatusMsg = { type: "error", text: "Drive上にバックアップが見つかりませんでした。" }; }
+        drive.lastSync = new Date().toISOString();
+        renderApp();
+      })
+      .catch(() => { drive.busy = false; ui.driveStatusMsg = { type: "error", text: "Driveからの取得に失敗しました。" }; renderApp(); });
+  });
+}
+function toggleDriveAutoSync() {
+  drive.autoSync = !drive.autoSync;
+  localStorage.setItem(DRIVE_AUTOSYNC_KEY, drive.autoSync ? "1" : "0");
+  if (drive.autoSync) scheduleDriveAutoSync();
+  renderApp();
 }
 
 /* ---------- derived data ---------- */
@@ -186,11 +389,105 @@ function sourceLabel(tx) {
   return acc ? acc.name : "?";
 }
 
+/* ---------- recurring fixed costs ---------- */
+function currentMonthKey() { return monthKeyOf(todayStr()); }
+function nextMonthKeyOf(mk) {
+  let [y, m] = mk.split("-").map(Number);
+  m += 1; if (m > 12) { m = 1; y += 1; }
+  return `${y}-${String(m).padStart(2, "0")}`;
+}
+function monthRangeInclusive(start, end) {
+  const res = [];
+  if (start > end) return res;
+  let [y, m] = start.split("-").map(Number);
+  const [ey, em] = end.split("-").map(Number);
+  while (y < ey || (y === ey && m <= em)) {
+    res.push(`${y}-${String(m).padStart(2, "0")}`);
+    m += 1; if (m > 12) { m = 1; y += 1; }
+  }
+  return res;
+}
+function recurringSourceLabel(r) {
+  if (r.cardId) {
+    const c = getCard(r.cardId), acc = c ? getAccount(c.linkedAccountId) : null;
+    return `${acc ? acc.name : "?"}（${c ? c.name : "?"}）`;
+  }
+  const acc = getAccount(r.accountId);
+  return acc ? acc.name : "?";
+}
+function materializeRecurringExpenses() {
+  const nowKey = currentMonthKey();
+  let changed = false;
+  data.recurringExpenses.forEach((r) => {
+    const end = r.endMonth && r.endMonth < nowKey ? r.endMonth : nowKey;
+    monthRangeInclusive(r.startMonth, end).forEach((mk) => {
+      const exists = data.transactions.some((t) => t.recurringId === r.id && monthKeyOf(t.date) === mk);
+      if (!exists) {
+        data.transactions.push({
+          id: uid(), type: "expense", date: `${mk}-01`, amount: r.amount,
+          memo: r.name, category: r.category || null,
+          accountId: r.cardId ? null : r.accountId, cardId: r.cardId || null,
+          recurringId: r.id,
+        });
+        changed = true;
+      }
+    });
+  });
+  if (changed) saveState();
+}
+function activeRecurringMonthlyTotal() {
+  const nowKey = currentMonthKey();
+  return data.recurringExpenses
+    .filter((r) => r.startMonth <= nowKey && (!r.endMonth || r.endMonth >= nowKey))
+    .reduce((s, r) => s + r.amount, 0);
+}
+function projectedNetWorth(targetMonth) {
+  let total = netWorth();
+  const nowKey = currentMonthKey();
+  if (!targetMonth || targetMonth <= nowKey) return total;
+  const months = monthRangeInclusive(nextMonthKeyOf(nowKey), targetMonth);
+  data.recurringExpenses.forEach((r) => {
+    months.forEach((mk) => {
+      if (mk < r.startMonth) return;
+      if (r.endMonth && mk > r.endMonth) return;
+      total -= r.amount;
+    });
+  });
+  return total;
+}
+
 /* ---------- mutations ---------- */
 function addTransaction(tx) { data.transactions.push({ id: uid(), ...tx }); saveState(); }
 function deleteTransaction(id) { data.transactions = data.transactions.filter((t) => t.id !== id); saveState(); renderApp(); }
 function addAccountRecord(acc) { data.accounts.push({ id: uid(), ...acc }); saveState(); }
 function addCardRecord(card) { data.cards.push({ id: uid(), ...card }); saveState(); }
+function deleteAccountCascade(id) {
+  const linkedCardIds = data.cards.filter((c) => c.linkedAccountId === id).map((c) => c.id);
+  data.cards = data.cards.filter((c) => c.linkedAccountId !== id);
+  data.transactions = data.transactions.filter((t) => {
+    if (t.accountId === id || t.toAccountId === id) return false;
+    if (t.cardId && linkedCardIds.includes(t.cardId)) return false;
+    return true;
+  });
+  data.recurringExpenses = data.recurringExpenses.filter((r) => !(r.accountId === id || linkedCardIds.includes(r.cardId)));
+  data.accounts = data.accounts.filter((a) => a.id !== id);
+  saveState(); renderApp();
+}
+function deleteCardCascade(id) {
+  data.transactions = data.transactions.filter((t) => t.cardId !== id);
+  data.recurringExpenses = data.recurringExpenses.filter((r) => r.cardId !== id);
+  data.cards = data.cards.filter((c) => c.id !== id);
+  saveState(); renderApp();
+}
+function addRecurringExpense(r) {
+  data.recurringExpenses.push({ id: uid(), ...r });
+  materializeRecurringExpenses();
+  saveState(); renderApp();
+}
+function removeRecurringExpense(id) {
+  data.recurringExpenses = data.recurringExpenses.filter((r) => r.id !== id);
+  saveState(); renderApp();
+}
 function addCategory(kind, name) {
   if (!name || !name.trim()) return;
   name = name.trim();
@@ -462,6 +759,35 @@ function renderOtherTab() {
     </div>`;
   const statusHtml = ui.statusMsg ? `<div class="kb-status ${ui.statusMsg.type}">${escapeHtml(ui.statusMsg.text)}</div>` : "";
 
+  const accountRows = data.accounts.map((a) => `
+    <div class="kb-cat-manage-row">
+      <span>${icon(TYPE_META[a.type] ? TYPE_META[a.type].icon : "bank", 13)} ${escapeHtml(a.name)}　<span style="color:var(--ink-soft)">${formatYen(getAccountBalance(a.id))}</span></span>
+      <button onclick="C.deleteAccountConfirm('${a.id}')">${icon("trash", 14)}</button>
+    </div>`).join("");
+  const cardRows = data.cards.map((c) => `
+    <div class="kb-cat-manage-row">
+      <span>${icon("card", 13)} ${escapeHtml(c.name)}　<span style="color:var(--ink-soft)">支払元：${escapeHtml((getAccount(c.linkedAccountId) || {}).name || "未設定")}</span></span>
+      <button onclick="C.deleteCardConfirm('${c.id}')">${icon("trash", 14)}</button>
+    </div>`).join("");
+
+  const nowKey = currentMonthKey();
+  const recurringRows = data.recurringExpenses.map((r) => {
+    const period = `${r.startMonth}〜${r.endMonth || "終了なし"}`;
+    const isActive = r.startMonth <= nowKey && (!r.endMonth || r.endMonth >= nowKey);
+    return `
+      <div class="kb-cat-manage-row" style="align-items:flex-start">
+        <span>
+          ${r.category ? `<span class="kb-tx-cat" style="background:${hashColor(r.category, CATEGORY_PALETTE)}">${escapeHtml(r.category)}</span>` : ""}
+          <b style="color:var(--navy)">${escapeHtml(r.name)}</b>　${formatYen(r.amount)}${isActive ? "" : `<span style="color:var(--ink-soft)">（現在は対象外）</span>`}
+          <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">${escapeHtml(recurringSourceLabel(r))}／${period}</div>
+        </span>
+        <button onclick="C.deleteRecurringConfirm('${r.id}')">${icon("trash", 14)}</button>
+      </div>`;
+  }).join("");
+
+  if (!ui.projectionMonth) ui.projectionMonth = nextMonthKeyOf(nowKey);
+  const projected = projectedNetWorth(ui.projectionMonth);
+
   return `
     <div class="kb-panel">
       <div class="kb-panel-title"><span class="kb-panel-icon coral">${icon("arrowUp", 15)}</span><h2>支出の種類を管理</h2></div>
@@ -478,6 +804,51 @@ function renderOtherTab() {
         <input type="text" id="newIncomeCat" placeholder="新しい種類を追加" />
         <button onclick="C.addCategoryFromInput('income', 'newIncomeCat')">追加</button>
       </div>
+    </div>
+    <div class="kb-panel">
+      <div class="kb-panel-title"><span class="kb-panel-icon navy">${icon("bank", 15)}</span><h2>島・カードの管理</h2></div>
+      <div class="kb-hint" style="margin-top:-2px">削除すると、紐づく取引記録も一緒に削除されます</div>
+      ${data.accounts.length === 0 ? `<div class="kb-empty">島がありません</div>` : accountRows}
+      ${data.cards.length ? `<div style="height:8px"></div>${cardRows}` : ""}
+    </div>
+    <div class="kb-panel">
+      <div class="kb-panel-title"><span class="kb-panel-icon coral">${icon("calendar", 15)}</span><h2>固定費（定期的な出費）</h2></div>
+      <div class="kb-hint" style="margin-top:-2px">現在有効な固定費の合計：${formatYen(activeRecurringMonthlyTotal())}／月</div>
+      ${data.recurringExpenses.length === 0 ? `<div class="kb-empty">登録された固定費はありません</div>` : recurringRows}
+      <button class="kb-add-btn" style="margin-top:10px" ${data.accounts.length === 0 ? "disabled" : ""} onclick="C.openRecurringModal()">${icon("plus", 14)} 固定費を追加</button>
+    </div>
+    <div class="kb-panel">
+      <div class="kb-panel-title"><span class="kb-panel-icon">${icon("compass", 15)}</span><h2>将来の資産予測</h2></div>
+      <div class="kb-toolbar">
+        <input type="month" class="kb-select" value="${ui.projectionMonth}" min="${nextMonthKeyOf(nowKey)}" onchange="C.setProjectionMonth(this.value)" />
+      </div>
+      <div class="kb-netvalue kb-num" style="font-size:22px;color:var(--navy)">${formatYen(projected)}</div>
+      <div class="kb-hint" style="margin:8px 0 0">現在の純資産に、登録済みの固定費を反映した見込み額です。収入や他の支出は含みません。</div>
+    </div>
+    <div class="kb-panel">
+      <div class="kb-panel-title"><span class="kb-panel-icon">${icon(drive.connected ? "cloud" : "cloudOff", 15)}</span><h2>クラウド同期（Google Drive）</h2></div>
+      ${ui.driveStatusMsg ? `<div class="kb-status ${ui.driveStatusMsg.type}">${escapeHtml(ui.driveStatusMsg.text)}</div>` : ""}
+      ${!driveConfigured() ? `
+        <div class="kb-hint" style="margin-top:-2px">READMEの手順でGoogle Cloud ConsoleのOAuthクライアントIDを取得し、app.js内のCONFIG.GOOGLE_CLIENT_IDに設定すると使えるようになります。</div>
+      ` : drive.connected ? `
+        <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">
+          接続済み${drive.lastSync ? `／最終同期：${new Date(drive.lastSync).toLocaleString("ja-JP")}` : ""}${drive.busy ? "／同期中…" : ""}
+        </div>
+        <div class="kb-btn-row">
+          <button class="kb-outline-btn" ${drive.busy ? "disabled" : ""} onclick="C.manualDriveUpload()">${icon("upload", 15)} 今すぐDriveに保存</button>
+          <button class="kb-outline-btn" ${drive.busy ? "disabled" : ""} onclick="C.manualDriveDownload()">${icon("download", 15)} Driveから復元</button>
+        </div>
+        <div class="kb-cat-manage-row" style="margin-top:4px">
+          <span>変更時に自動でDriveへ保存する</span>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox" ${drive.autoSync ? "checked" : ""} onchange="C.toggleDriveAutoSync()" />
+          </label>
+        </div>
+        <button class="kb-outline-btn" style="margin-top:10px" onclick="C.disconnectDrive()">連携を解除する</button>
+      ` : `
+        <div class="kb-hint" style="margin-top:-2px">Googleアカウントでログインすると、変更内容が自動でGoogle Driveに保存され、他の端末からも復元できます。</div>
+        <button class="kb-outline-btn" ${drive.busy ? "disabled" : ""} onclick="C.connectDrive()">${icon("cloud", 15)} Googleでログイン</button>
+      `}
     </div>
     <div class="kb-panel">
       <div class="kb-panel-title"><span class="kb-panel-icon navy">${icon("settings", 15)}</span><h2>データ管理</h2></div>
@@ -698,6 +1069,112 @@ function openCardModal() {
   });
 }
 
+function deleteAccountConfirm(id) {
+  const acc = getAccount(id);
+  if (!acc) return;
+  const linkedCards = data.cards.filter((c) => c.linkedAccountId === id).length;
+  const txCount = data.transactions.filter((t) => t.accountId === id || t.toAccountId === id || (t.cardId && getCard(t.cardId) && getCard(t.cardId).linkedAccountId === id)).length;
+  let msg = `「${acc.name}」を削除します。`;
+  if (linkedCards || txCount) msg += `紐づくカード${linkedCards}件・取引記録${txCount}件も一緒に削除されます。`;
+  msg += "この操作は取り消せません。本当によろしいですか？";
+  openConfirmModal(msg, () => deleteAccountCascade(id));
+}
+function deleteCardConfirm(id) {
+  const c = getCard(id);
+  if (!c) return;
+  const txCount = data.transactions.filter((t) => t.cardId === id).length;
+  let msg = `「${c.name}」を削除します。`;
+  if (txCount) msg += `このカードに紐づく取引記録${txCount}件も一緒に削除されます。`;
+  msg += "この操作は取り消せません。本当によろしいですか？";
+  openConfirmModal(msg, () => deleteCardCascade(id));
+}
+function deleteRecurringConfirm(id) {
+  const r = data.recurringExpenses.find((x) => x.id === id);
+  if (!r) return;
+  openConfirmModal(`「${r.name}」の固定費登録を削除します。今後は自動記録されなくなります（すでに記録済みの取引はそのまま残ります）。よろしいですか？`, () => removeRecurringExpense(id));
+}
+
+function openRecurringModal() {
+  if (data.accounts.length === 0) return;
+  let category = "";
+  let sourceType = "account";
+  let accountId = data.accounts[0].id;
+  let cardId = "";
+  let hasEnd = false;
+  const cats = data.expenseCats;
+
+  function catChipsHtml() {
+    return cats.map((c) => `<div class="kb-chip ${category === c ? "active" : ""}" data-cat="${escapeHtml(c)}">${escapeHtml(c)}</div>`).join("");
+  }
+  function sourceTypeChipsHtml() {
+    return `
+      <div class="kb-chip ${sourceType === "account" ? "active" : ""}" data-src="account">口座・手持ち</div>
+      <div class="kb-chip ${sourceType === "card" ? "active" : ""}" data-src="card" style="opacity:${data.cards.length ? 1 : 0.4};pointer-events:${data.cards.length ? "auto" : "none"}">カード</div>`;
+  }
+  function sourceFieldHtml() {
+    if (sourceType === "account") {
+      return `<select id="recAccountSelect">${data.accounts.map((a) => `<option value="${a.id}">${escapeHtml(a.name)}</option>`).join("")}</select>`;
+    }
+    return `<select id="recCardSelect"><option value="">選択してください</option>${data.cards.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("")}</select>`;
+  }
+
+  const nowKey = currentMonthKey();
+  mountModal(`
+    <div class="kb-modal-backdrop">
+      <div class="kb-modal" onclick="event.stopPropagation()">
+        <button class="kb-modal-close" onclick="C.closeModal()">${icon("x", 18)}</button>
+        <h3 style="color:var(--coral)">固定費を追加</h3>
+        <div class="kb-field"><label>名前</label><input type="text" id="recName" placeholder="例：家賃、〇〇サブスク" /></div>
+        <div class="kb-field"><label>金額（月あたり）</label><input type="number" min="0" id="recAmount" placeholder="0" /></div>
+        <div class="kb-field"><label>種類</label><div class="kb-chip-group" id="recCatChips">${catChipsHtml()}</div></div>
+        <div class="kb-field">
+          <label>支払い元</label>
+          <div class="kb-chip-group" id="recSourceTypeChips" style="margin-bottom:8px">${sourceTypeChipsHtml()}</div>
+          <div id="recSourceField">${sourceFieldHtml()}</div>
+        </div>
+        <div class="kb-field"><label>開始月</label><input type="month" id="recStart" value="${nowKey}" /></div>
+        <div class="kb-field">
+          <label><input type="checkbox" id="recHasEnd" style="width:auto;margin-right:6px" />終了月を設定する</label>
+          <input type="month" id="recEnd" value="${nowKey}" style="margin-top:8px;display:none" />
+        </div>
+        <button class="kb-submit" id="recSubmitBtn" style="background:var(--coral)">追加する</button>
+      </div>
+    </div>`);
+
+  document.getElementById("recCatChips").addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-cat]"); if (!chip) return;
+    category = chip.dataset.cat;
+    document.getElementById("recCatChips").innerHTML = catChipsHtml();
+  });
+  document.getElementById("recSourceTypeChips").addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-src]"); if (!chip) return;
+    sourceType = chip.dataset.src;
+    document.getElementById("recSourceTypeChips").innerHTML = sourceTypeChipsHtml();
+    document.getElementById("recSourceField").innerHTML = sourceFieldHtml();
+  });
+  document.getElementById("recHasEnd").addEventListener("change", (e) => {
+    hasEnd = e.target.checked;
+    document.getElementById("recEnd").style.display = hasEnd ? "block" : "none";
+  });
+  document.getElementById("recSubmitBtn").addEventListener("click", () => {
+    const name = document.getElementById("recName").value.trim();
+    const amount = Number(document.getElementById("recAmount").value);
+    if (!name || !amount || amount <= 0) return;
+    const startMonth = document.getElementById("recStart").value || nowKey;
+    const endMonth = hasEnd ? (document.getElementById("recEnd").value || null) : null;
+    let recAccountId = null, recCardId = null;
+    if (sourceType === "card") {
+      recCardId = document.getElementById("recCardSelect").value;
+      if (!recCardId) return;
+    } else {
+      recAccountId = document.getElementById("recAccountSelect").value;
+      if (!recAccountId) return;
+    }
+    addRecurringExpense({ name, amount, category: category || null, accountId: recAccountId, cardId: recCardId, startMonth, endMonth });
+    closeModal();
+  });
+}
+
 function openTxModal(mode, presetAccountId) {
   const accentMap = { expense: "var(--coral)", income: "var(--mint-deep)", transfer: "var(--wash)" };
   const titleMap = { expense: "出費を記録", income: "入金を記録", transfer: "資金移動" };
@@ -864,6 +1341,16 @@ window.C = {
   openTxModal(mode, presetAccountId) { openTxModal(mode, presetAccountId); },
   openAccountModal() { openAccountModal(); },
   openCardModal() { openCardModal(); },
+  deleteAccountConfirm(id) { deleteAccountConfirm(id); },
+  deleteCardConfirm(id) { deleteCardConfirm(id); },
+  openRecurringModal() { openRecurringModal(); },
+  deleteRecurringConfirm(id) { deleteRecurringConfirm(id); },
+  setProjectionMonth(v) { ui.projectionMonth = v; renderApp(); },
+  connectDrive() { connectDrive(true); },
+  disconnectDrive() { disconnectDrive(); },
+  manualDriveUpload() { manualDriveUpload(); },
+  manualDriveDownload() { manualDriveDownload(); },
+  toggleDriveAutoSync() { toggleDriveAutoSync(); },
   closeModal() { closeModal(); },
   exportBackup() { exportBackup(); },
   handleImportFile(inputEl) {
@@ -876,4 +1363,6 @@ window.C = {
 
 /* ---------- init ---------- */
 loadData();
+materializeRecurringExpenses();
 renderApp();
+if (window.__gisScriptLoaded) onGisReady();
