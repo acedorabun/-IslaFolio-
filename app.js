@@ -93,6 +93,20 @@ function shadeColor(hex, percent) {
 function escapeHtml(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+function formatAmountInput(el) {
+  const raw = el.value.replace(/[^\d]/g, "");
+  const pos = el.selectionStart;
+  const before = el.value.length;
+  el.value = raw ? Number(raw).toLocaleString("ja-JP") : "";
+  const after = el.value.length;
+  const newPos = Math.max(0, (pos || after) + (after - before));
+  try { el.setSelectionRange(newPos, newPos); } catch (e) { /* ignore on unsupported input types */ }
+}
+function parseAmountInput(id) {
+  const el = document.getElementById(id);
+  if (!el) return 0;
+  return Number(el.value.replace(/[^\d]/g, "")) || 0;
+}
 
 /* ---------- persisted data ---------- */
 let data = {
@@ -230,15 +244,30 @@ async function handleDriveConnected() {
     }
     drive.lastSync = new Date().toISOString();
   } catch (e) {
-    ui.driveStatusMsg = { type: "error", text: "Driveからの取得に失敗しました。" };
+    ui.driveStatusMsg = { type: "error", text: `Driveからの取得に失敗しました（${driveErrorText(e)}）。` };
   }
   renderApp();
+}
+function driveErrorText(e) {
+  if (e && e.status === 403) return "権限エラー(403)。Google Drive APIが有効化されているか、OAuth同意画面のスコープにdrive.appdataが追加されているかご確認ください";
+  if (e && e.status === 401) return "認証切れ(401)。再度ログインしてください";
+  if (e && e.status === 404) return "見つかりません(404)";
+  if (e && e.detail) return `${e.status}: ${e.detail}`;
+  if (e && e.message) return e.message;
+  return "不明なエラー";
 }
 async function driveApiFetch(url, options) {
   options = options || {};
   options.headers = Object.assign({}, options.headers, { Authorization: `Bearer ${drive.token}` });
   const res = await fetch(url, options);
-  if (!res.ok) throw new Error("drive_api_error_" + res.status);
+  if (!res.ok) {
+    let detail = "";
+    try { const errJson = await res.json(); detail = (errJson.error && errJson.error.message) || ""; } catch (e) { /* ignore parse failure */ }
+    const err = new Error(`drive_api_error_${res.status}`);
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
+  }
   return res;
 }
 async function driveFindFile() {
@@ -291,7 +320,7 @@ function scheduleDriveAutoSync() {
     drive.busy = true;
     driveUpload()
       .then(() => { drive.lastSync = new Date().toISOString(); drive.busy = false; renderApp(); })
-      .catch(() => { drive.busy = false; ui.driveStatusMsg = { type: "error", text: "自動保存に失敗しました。時間をおいて再度お試しください。" }; renderApp(); });
+      .catch((e) => { drive.busy = false; ui.driveStatusMsg = { type: "error", text: `自動保存に失敗しました（${driveErrorText(e)}）。` }; renderApp(); });
   }, 4000);
 }
 function manualDriveUpload() {
@@ -299,7 +328,7 @@ function manualDriveUpload() {
   drive.busy = true; renderApp();
   driveUpload()
     .then(() => { drive.lastSync = new Date().toISOString(); drive.busy = false; ui.driveStatusMsg = { type: "success", text: "Driveに保存しました。" }; renderApp(); })
-    .catch(() => { drive.busy = false; ui.driveStatusMsg = { type: "error", text: "Driveへの保存に失敗しました。" }; renderApp(); });
+    .catch((e) => { drive.busy = false; ui.driveStatusMsg = { type: "error", text: `Driveへの保存に失敗しました（${driveErrorText(e)}）。` }; renderApp(); });
 }
 function manualDriveDownload() {
   if (!drive.connected) return;
@@ -313,7 +342,7 @@ function manualDriveDownload() {
         drive.lastSync = new Date().toISOString();
         renderApp();
       })
-      .catch(() => { drive.busy = false; ui.driveStatusMsg = { type: "error", text: "Driveからの取得に失敗しました。" }; renderApp(); });
+      .catch((e) => { drive.busy = false; ui.driveStatusMsg = { type: "error", text: `Driveからの取得に失敗しました（${driveErrorText(e)}）。` }; renderApp(); });
   });
 }
 function toggleDriveAutoSync() {
@@ -398,6 +427,38 @@ function copyTx(id) {
     amount: tx.amount, memo: tx.memo, category: tx.category,
     accountId: tx.accountId, cardId: tx.cardId, toAccountId: tx.toAccountId,
   });
+}
+function deleteTxConfirm(id) {
+  const tx = data.transactions.find((t) => t.id === id);
+  if (!tx) return;
+  const label = tx.memo || (tx.type === "transfer" ? "資金移動" : "（メモなし）");
+  openConfirmModal(`この記録（${label}／${formatYen(tx.amount)}）を削除します。この操作は取り消せません。よろしいですか？`, () => deleteTransaction(id));
+}
+function txRowTap(e, id) {
+  if (e.target.closest("button")) return;
+  openTxDetail(id);
+}
+function openTxDetail(id) {
+  const tx = data.transactions.find((t) => t.id === id);
+  if (!tx) return;
+  const accent = tx.type === "expense" ? "var(--coral)" : tx.type === "income" ? "var(--mint-deep)" : "var(--wash)";
+  const typeLabel = tx.type === "expense" ? "出費" : tx.type === "income" ? "入金" : "資金移動";
+  mountModal(`
+    <div class="kb-modal-backdrop">
+      <div class="kb-modal" onclick="event.stopPropagation()">
+        <button class="kb-modal-close" onclick="C.closeModal()">${icon("x", 18)}</button>
+        <h3 style="color:${accent}">${typeLabel}の詳細</h3>
+        <div class="kb-field"><label>日付</label><div>${tx.date}</div></div>
+        ${tx.category ? `<div class="kb-field"><label>種類</label><div><span class="kb-tx-cat" style="background:${hashColor(tx.category, CATEGORY_PALETTE)}">${escapeHtml(tx.category)}</span></div></div>` : ""}
+        <div class="kb-field"><label>用途・メモ</label><div style="font-size:14px">${escapeHtml(tx.memo || "（メモなし）")}</div></div>
+        <div class="kb-field"><label>${tx.type === "transfer" ? "移動元 → 移動先" : tx.type === "income" ? "入金先" : "支払い元"}</label><div style="font-size:14px">${escapeHtml(sourceLabel(tx))}</div></div>
+        <div class="kb-field"><label>金額</label><div class="kb-num" style="font-size:19px;color:${accent}">${tx.type === "expense" ? "−" : tx.type === "income" ? "+" : ""}${formatYen(tx.amount)}</div></div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          ${tx.type !== "transfer" ? `<button class="kb-outline-btn" style="flex:1;justify-content:center" onclick="C.copyTx('${tx.id}')">${icon("copy", 15)} コピーして入力</button>` : ""}
+          <button class="kb-danger-btn" style="flex:1" onclick="C.deleteTxConfirm('${tx.id}')">${icon("trash", 15)} 削除</button>
+        </div>
+      </div>
+    </div>`);
 }
 
 /* ---------- recurring fixed costs ---------- */
@@ -530,6 +591,7 @@ function updateRecurringExpense(id, patch) {
 }
 function removeRecurringExpense(id) {
   data.recurringExpenses = data.recurringExpenses.filter((r) => r.id !== id);
+  data.transactions = data.transactions.filter((t) => t.recurringId !== id);
   saveState(); renderApp();
 }
 function addCategory(kind, name) {
@@ -793,21 +855,18 @@ function renderRecordTab() {
   const txHtml = tx.length === 0 ? `<div class="kb-empty">${ui.txFilterMode === "month" ? "この月の記録はありません。" : "記録がありません。ホームタブのボタンから追加しましょう。"}</div>` : `
     <div class="kb-txlist">
       ${tx.map((t) => `
-        <div class="kb-tx-row">
+        <div class="kb-tx-row" onclick="C.txRowTap(event, '${t.id}')">
           <div class="kb-tx-mark" style="background:${t.type === "expense" ? "var(--coral)" : t.type === "income" ? "var(--mint)" : "var(--wash)"}"></div>
           <div class="kb-tx-date">${t.date.slice(5).replace("-", "/")}</div>
           <div class="kb-tx-mid">
-            <div class="kb-tx-memo">
-              ${t.category ? `<span class="kb-tx-cat" style="background:${hashColor(t.category, CATEGORY_PALETTE)}">${escapeHtml(t.category)}</span>` : ""}
-              ${escapeHtml(t.memo || (t.type === "transfer" ? "資金移動" : "（メモなし）"))}
-            </div>
-            <div class="kb-tx-sub">${escapeHtml(sourceLabel(t))}</div>
+            ${t.category ? `<div><span class="kb-tx-cat" style="background:${hashColor(t.category, CATEGORY_PALETTE)}">${escapeHtml(t.category)}</span></div>` : ""}
+            <div class="kb-tx-memo">${escapeHtml(t.memo || (t.type === "transfer" ? "資金移動" : "（メモなし）"))}</div>
           </div>
           <div class="kb-tx-amt kb-num" style="color:${t.type === "expense" ? "var(--coral)" : t.type === "income" ? "var(--mint-deep)" : "var(--ink-soft)"}">
             ${t.type === "expense" ? "−" : t.type === "income" ? "+" : ""}${formatYen(t.amount)}
           </div>
           ${t.type !== "transfer" ? `<button class="kb-tx-del" onclick="C.copyTx('${t.id}')" title="コピーして新規入力">${icon("copy", 14)}</button>` : ""}
-          <button class="kb-tx-del" onclick="C.deleteTx('${t.id}')" title="削除">${icon("trash", 14)}</button>
+          <button class="kb-tx-del" onclick="C.deleteTxConfirm('${t.id}')" title="削除">${icon("trash", 14)}</button>
         </div>`).join("")}
     </div>`;
 
@@ -1096,7 +1155,7 @@ function openAccountModal() {
         <h3>島を追加</h3>
         <div class="kb-field"><label>名前</label><input type="text" id="accName" placeholder="例：〇〇銀行、財布、貯金箱" /></div>
         <div class="kb-field"><label>種類</label><div class="kb-chip-group" id="accTypeGroup">${typeChip()}</div></div>
-        <div class="kb-field"><label>現在の残高</label><input type="number" id="accBalance" placeholder="0" /></div>
+        <div class="kb-field"><label>現在の残高</label><input type="text" inputmode="numeric" id="accBalance" placeholder="0" oninput="formatAmountInput(this)" /></div>
         <div class="kb-field"><label>色</label><div class="kb-color-row" id="accColorRow">${colorDots()}</div></div>
         <button class="kb-submit" id="accSubmitBtn">追加する</button>
       </div>
@@ -1115,7 +1174,7 @@ function openAccountModal() {
   document.getElementById("accSubmitBtn").addEventListener("click", () => {
     const name = document.getElementById("accName").value.trim();
     if (!name) return;
-    const balance = Number(document.getElementById("accBalance").value) || 0;
+    const balance = parseAmountInput("accBalance");
     addAccountRecord({ name, type, initialBalance: balance, color });
     closeModal(); renderApp();
   });
@@ -1176,7 +1235,8 @@ function deleteCardConfirm(id) {
 function deleteRecurringConfirm(id) {
   const r = data.recurringExpenses.find((x) => x.id === id);
   if (!r) return;
-  openConfirmModal(`「${r.name}」の固定費登録を削除します。今後は自動記録されなくなります（すでに記録済みの取引はそのまま残ります）。よろしいですか？`, () => removeRecurringExpense(id));
+  const txCount = data.transactions.filter((t) => t.recurringId === id).length;
+  openConfirmModal(`「${r.name}」の登録を削除します。これまでに自動記録された取引${txCount}件もすべて削除されます。この操作は取り消せません。よろしいですか？`, () => removeRecurringExpense(id));
 }
 
 function openRecurringModal(existingId) {
@@ -1218,7 +1278,7 @@ function openRecurringModal(existingId) {
         <h3 style="color:var(--coral)">${existing ? "固定費・固定収入を編集" : "固定費・固定収入を追加"}</h3>
         <div class="kb-field"><label>種類</label><div class="kb-chip-group" id="recTypeChips">${typeChipsHtml()}</div></div>
         <div class="kb-field"><label>名前</label><input type="text" id="recName" placeholder="例：家賃、〇〇サブスク、家賃収入" value="${escapeHtml(existing ? existing.name : "")}" /></div>
-        <div class="kb-field"><label>金額（月あたり）</label><input type="number" min="0" id="recAmount" placeholder="0" value="${existing ? existing.amount : ""}" /></div>
+        <div class="kb-field"><label>金額（月あたり）</label><input type="text" inputmode="numeric" id="recAmount" placeholder="0" value="${existing ? Number(existing.amount).toLocaleString("ja-JP") : ""}" oninput="formatAmountInput(this)" /></div>
         <div class="kb-field"><label>カテゴリ</label><div class="kb-chip-group" id="recCatChips">${catChipsHtml()}</div></div>
         <div class="kb-field" id="recSourceWrap">
           <label id="recSourceLabel">${type === "income" ? "入金先" : "支払い元"}</label>
@@ -1267,7 +1327,7 @@ function openRecurringModal(existingId) {
   });
   document.getElementById("recSubmitBtn").addEventListener("click", () => {
     const name = document.getElementById("recName").value.trim();
-    const amount = Number(document.getElementById("recAmount").value);
+    const amount = parseAmountInput("recAmount");
     if (!name || !amount || amount <= 0) return;
     const startMonth = document.getElementById("recStart").value || nowKey;
     const endMonth = hasEnd ? (document.getElementById("recEnd").value || null) : null;
@@ -1354,7 +1414,7 @@ function openTxModal(mode, presetAccountId, prefill) {
         </div>`;
     }
     return `
-      <div class="kb-field"><label>金額</label><input type="number" min="0" inputmode="numeric" placeholder="0" id="txAmount" value="${prefill.amount != null ? prefill.amount : ""}" /></div>
+      <div class="kb-field"><label>金額</label><input type="text" inputmode="numeric" placeholder="0" id="txAmount" value="${prefill.amount != null ? Number(prefill.amount).toLocaleString("ja-JP") : ""}" oninput="formatAmountInput(this)" /></div>
       <div class="kb-field"><label>用途・メモ</label><input type="text" placeholder="例：スーパーで買い物" id="txMemo" value="${escapeHtml(prefill.memo || "")}" /></div>
       <div class="kb-field"><label>日付</label><input type="date" id="txDate" value="${todayStr()}" /></div>
       ${categorySection}
@@ -1400,7 +1460,7 @@ function openTxModal(mode, presetAccountId, prefill) {
     wireSourceField();
     const submitBtn = document.getElementById("txSubmitBtn");
     submitBtn.addEventListener("click", () => {
-      const amount = Number(document.getElementById("txAmount").value);
+      const amount = parseAmountInput("txAmount");
       if (!amount || amount <= 0) return;
       const memo = document.getElementById("txMemo").value.trim();
       const date = document.getElementById("txDate").value || todayStr();
@@ -1447,6 +1507,9 @@ window.C = {
   setCatViewType(t) { ui.catViewType = t; ui.catViewCategory = ""; renderApp(); },
   setCatViewCategory(c) { ui.catViewCategory = c; renderApp(); },
   deleteTx(id) { deleteTransaction(id); },
+  deleteTxConfirm(id) { deleteTxConfirm(id); },
+  txRowTap(e, id) { txRowTap(e, id); },
+  openTxDetail(id) { openTxDetail(id); },
   removeCategory(kind, name) { removeCategory(kind, name); },
   addCategoryFromInput(kind, inputId) {
     const el = document.getElementById(inputId);

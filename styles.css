@@ -151,12 +151,13 @@ svg.icon.filled { fill: currentColor; stroke: none; }
 .kb-toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom: 12px; }
 
 .kb-txlist { max-height: 460px; overflow-y: auto; padding-right:4px; }
-.kb-tx-row { display:flex; align-items:center; gap:10px; padding:10px 4px; border-bottom:1px solid var(--line); font-size:13px; }
+.kb-tx-row { display:flex; align-items:center; gap:10px; padding:10px 4px; border-bottom:1px solid var(--line); font-size:13px; cursor:pointer; }
+.kb-tx-row:hover { background: var(--wash-soft); }
 .kb-tx-row:last-child { border-bottom:none; }
 .kb-tx-mark { width:5px; align-self:stretch; border-radius:3px; flex-shrink:0; }
 .kb-tx-date { width:64px; flex-shrink:0; color:var(--ink-soft); font-size:11.5px; }
 .kb-tx-mid { flex:1; min-width:0; }
-.kb-tx-memo { font-weight:600; color: var(--navy); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.kb-tx-memo { font-weight:600; color: var(--navy); margin-top:2px; word-break:break-word; }
 .kb-tx-sub { font-size:11px; color:var(--ink-soft); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .kb-tx-cat { display:inline-block; font-size:10.5px; padding:1px 7px; border-radius:20px; color:#fff; margin-right:6px; }
 .kb-tx-amt { width:110px; text-align:right; flex-shrink:0; font-size:14px; }
