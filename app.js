@@ -52,6 +52,7 @@ const ICONS = {
   cloud: '<path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.6 1.5A4 4 0 0 0 6 19h11.5z"/>',
   cloudOff: '<path d="M17.5 19a4.5 4.5 0 0 0 .5-8.97"/><path d="M9.2 5.2A6 6 0 0 1 17.9 10.5"/><path d="M5.6 8A4 4 0 0 0 6 19h9.5"/><line x1="2" y1="2" x2="22" y2="22"/>',
   check: '<polyline points="20 6 9 17 4 12"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
 };
 function icon(name, size) {
   size = size || 16;
@@ -112,7 +113,9 @@ let ui = {
   catViewCategory: "",
   statusMsg: null,
   driveStatusMsg: null,
-  projectionMonth: "",
+  netWorthViewMonth: "",
+  txFilterMode: "all",
+  txFilterMonth: "",
 };
 
 /* ---------- Google Drive sync state (not persisted in data payload) ---------- */
@@ -388,6 +391,14 @@ function sourceLabel(tx) {
   const acc = getAccount(tx.accountId);
   return acc ? acc.name : "?";
 }
+function copyTx(id) {
+  const tx = data.transactions.find((t) => t.id === id);
+  if (!tx) return;
+  openTxModal(tx.type, null, {
+    amount: tx.amount, memo: tx.memo, category: tx.category,
+    accountId: tx.accountId, cardId: tx.cardId, toAccountId: tx.toAccountId,
+  });
+}
 
 /* ---------- recurring fixed costs ---------- */
 function currentMonthKey() { return monthKeyOf(todayStr()); }
@@ -424,7 +435,7 @@ function materializeRecurringExpenses() {
       const exists = data.transactions.some((t) => t.recurringId === r.id && monthKeyOf(t.date) === mk);
       if (!exists) {
         data.transactions.push({
-          id: uid(), type: "expense", date: `${mk}-01`, amount: r.amount,
+          id: uid(), type: r.type === "income" ? "income" : "expense", date: `${mk}-01`, amount: r.amount,
           memo: r.name, category: r.category || null,
           accountId: r.cardId ? null : r.accountId, cardId: r.cardId || null,
           recurringId: r.id,
@@ -439,7 +450,7 @@ function activeRecurringMonthlyTotal() {
   const nowKey = currentMonthKey();
   return data.recurringExpenses
     .filter((r) => r.startMonth <= nowKey && (!r.endMonth || r.endMonth >= nowKey))
-    .reduce((s, r) => s + r.amount, 0);
+    .reduce((s, r) => s + (r.type === "income" ? r.amount : -r.amount), 0);
 }
 function projectedNetWorth(targetMonth) {
   let total = netWorth();
@@ -450,10 +461,32 @@ function projectedNetWorth(targetMonth) {
     months.forEach((mk) => {
       if (mk < r.startMonth) return;
       if (r.endMonth && mk > r.endMonth) return;
-      total -= r.amount;
+      total += r.type === "income" ? r.amount : -r.amount;
     });
   });
   return total;
+}
+function getAccountBalanceBefore(accountId, cutoffExclusiveDateStr) {
+  const acc = getAccount(accountId);
+  if (!acc) return 0;
+  let bal = acc.initialBalance || 0;
+  data.transactions.forEach((tx) => {
+    if (tx.date >= cutoffExclusiveDateStr) return;
+    if (tx.type === "expense") { if (resolvedAccountIdForTx(tx) === accountId) bal -= tx.amount; }
+    else if (tx.type === "income") { if (tx.accountId === accountId) bal += tx.amount; }
+    else if (tx.type === "transfer") {
+      if (tx.accountId === accountId) bal -= tx.amount;
+      if (tx.toAccountId === accountId) bal += tx.amount;
+    }
+  });
+  return bal;
+}
+function netWorthAtMonth(mk) {
+  const nowKey = currentMonthKey();
+  if (!mk || mk === nowKey) return netWorth();
+  if (mk > nowKey) return projectedNetWorth(mk);
+  const cutoffExclusive = `${nextMonthKeyOf(mk)}-01`;
+  return data.accounts.reduce((sum, a) => sum + getAccountBalanceBefore(a.id, cutoffExclusive), 0);
 }
 
 /* ---------- mutations ---------- */
@@ -480,7 +513,18 @@ function deleteCardCascade(id) {
   saveState(); renderApp();
 }
 function addRecurringExpense(r) {
-  data.recurringExpenses.push({ id: uid(), ...r });
+  data.recurringExpenses.push({ id: uid(), type: "expense", ...r });
+  materializeRecurringExpenses();
+  saveState(); renderApp();
+}
+function updateRecurringExpense(id, patch) {
+  const idx = data.recurringExpenses.findIndex((r) => r.id === id);
+  if (idx === -1) return;
+  data.recurringExpenses[idx] = { ...data.recurringExpenses[idx], ...patch };
+  const nowKey = currentMonthKey();
+  // drop current/future auto-generated entries so they regenerate with the new values;
+  // past months stay as historical fact.
+  data.transactions = data.transactions.filter((t) => !(t.recurringId === id && monthKeyOf(t.date) >= nowKey));
   materializeRecurringExpenses();
   saveState(); renderApp();
 }
@@ -603,6 +647,12 @@ function categoryBarChartSVG(series, color) {
 
 /* ---------- render: header ---------- */
 function renderHeader() {
+  const nowKey = currentMonthKey();
+  if (!ui.netWorthViewMonth) ui.netWorthViewMonth = nowKey;
+  const viewed = netWorthAtMonth(ui.netWorthViewMonth);
+  let label = "純資産合計";
+  if (ui.netWorthViewMonth > nowKey) label = `${monthDisplayLabel(ui.netWorthViewMonth)}の資産予測`;
+  else if (ui.netWorthViewMonth < nowKey) label = `${monthDisplayLabel(ui.netWorthViewMonth)}時点の純資産`;
   return `
     <div class="kb-header">
       <div class="kb-title">
@@ -614,9 +664,18 @@ function renderHeader() {
       </div>
       <div class="kb-netbadge">
         <div class="kb-net-dot"></div>
-        <div><div class="kb-netlabel">純資産合計</div><div class="kb-netvalue kb-num">${formatYen(netWorth())}</div></div>
+        <div>
+          <div class="kb-netlabel">${label}
+            <input type="month" value="${ui.netWorthViewMonth}" onchange="C.setNetWorthViewMonth(this.value)" style="border:none;background:none;font-size:10.5px;color:var(--ink-soft);font-family:inherit;padding:0;margin-left:4px" />
+          </div>
+          <div class="kb-netvalue kb-num">${formatYen(viewed)}</div>
+        </div>
       </div>
     </div>`;
+}
+function monthDisplayLabel(mk) {
+  const [y, m] = mk.split("-");
+  return `${y}年${parseInt(m, 10)}月`;
 }
 
 /* ---------- render: home tab ---------- */
@@ -625,7 +684,7 @@ function renderHomeTab() {
     const meta = TYPE_META[acc.type] || TYPE_META.bank;
     const deep = shadeColor(acc.color, -16);
     return `
-      <div class="kb-island" data-reorder-item="account" data-id="${acc.id}" style="--island-color:${acc.color};--island-color-deep:${deep}">
+      <div class="kb-island" data-reorder-item="account" data-id="${acc.id}" style="--island-color:${acc.color};--island-color-deep:${deep}" onclick="C.islandTap(event, '${acc.id}')">
         <div class="kb-island-top" data-reorder-handle>
           <span class="kb-island-icon">${icon(meta.icon, 14)}</span>
           ${icon("grip", 15).replace('class="icon"', 'class="icon kb-island-grip"')}
@@ -656,6 +715,23 @@ function renderHomeTab() {
       </div>`;
   }).join("");
 
+  const nowKey = currentMonthKey();
+  const recurringRows = data.recurringExpenses.map((r) => {
+    const period = `${r.startMonth}〜${r.endMonth || "終了なし"}`;
+    const isActive = r.startMonth <= nowKey && (!r.endMonth || r.endMonth >= nowKey);
+    const isIncome = r.type === "income";
+    return `
+      <div class="kb-cat-manage-row" style="align-items:flex-start;cursor:pointer" onclick="if(!event.target.closest('button'))C.openRecurringModal('${r.id}')">
+        <span>
+          ${r.category ? `<span class="kb-tx-cat" style="background:${hashColor(r.category, CATEGORY_PALETTE)}">${escapeHtml(r.category)}</span>` : ""}
+          <span class="kb-tx-cat" style="background:${isIncome ? "var(--mint-deep)" : "var(--coral)"}">${isIncome ? "収入" : "支出"}</span>
+          <b style="color:var(--navy)">${escapeHtml(r.name)}</b>　${formatYen(r.amount)}${isActive ? "" : `<span style="color:var(--ink-soft)">（現在は対象外）</span>`}
+          <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">${escapeHtml(recurringSourceLabel(r))}／${period}</div>
+        </span>
+        <button onclick="event.stopPropagation();C.deleteRecurringConfirm('${r.id}')">${icon("trash", 14)}</button>
+      </div>`;
+  }).join("");
+
   return `
     <div class="kb-sticky-actions">
       <div class="kb-sticky-actions-inner">
@@ -666,19 +742,25 @@ function renderHomeTab() {
     </div>
     <div class="kb-panel">
       <div class="kb-panel-title"><span class="kb-panel-icon">${icon("bank", 15)}</span><h2>資金源の島々</h2></div>
-      ${data.accounts.length > 1 ? `<div class="kb-hint">島を長押しすると並び替えできます</div>` : ""}
+      <div class="kb-hint">タップで入金・移動・使用を選択、長押しで並び替えできます</div>
       <div class="kb-island-grid">
         ${islandsHtml}
         <button class="kb-add-island" onclick="C.openAccountModal()">${icon("plus", 20)}<span>島を追加</span></button>
       </div>
     </div>
-    <div class="kb-panel" style="margin-bottom:0">
+    <div class="kb-panel">
       <div class="kb-panel-title"><span class="kb-panel-icon navy">${icon("card", 15)}</span><h2>カード</h2></div>
       ${data.cards.length > 1 ? `<div class="kb-hint">長押しすると並び替えできます</div>` : ""}
       <div class="kb-dock-grid">
         ${docksHtml}
         <button class="kb-add-island" style="min-height:auto;padding:20px 0" ${data.accounts.length === 0 ? "disabled" : ""} onclick="C.openCardModal()">${icon("plus", 18)}<span>カードを追加</span></button>
       </div>
+    </div>
+    <div class="kb-panel" style="margin-bottom:0">
+      <div class="kb-panel-title"><span class="kb-panel-icon coral">${icon("calendar", 15)}</span><h2>固定費・固定収入</h2></div>
+      <div class="kb-hint" style="margin-top:-2px">現在有効な固定費の合計：${formatYen(activeRecurringMonthlyTotal())}／月　タップで内容を編集できます</div>
+      ${data.recurringExpenses.length === 0 ? `<div class="kb-empty">登録された固定費・固定収入はありません</div>` : recurringRows}
+      <button class="kb-add-btn" style="margin-top:10px" ${data.accounts.length === 0 ? "disabled" : ""} onclick="C.openRecurringModal()">${icon("plus", 14)} 固定費・固定収入を追加</button>
     </div>`;
 }
 
@@ -689,7 +771,9 @@ function renderRecordTab() {
   const cats = ui.catViewType === "expense" ? data.expenseCats : data.incomeCats;
   if (!cats.includes(ui.catViewCategory)) ui.catViewCategory = cats[0] || "";
   const catSeries = categoryYearSeries(ui.recordYear, ui.catViewType, ui.catViewCategory);
-  const tx = sortedTransactions();
+  if (!ui.txFilterMonth) ui.txFilterMonth = currentMonthKey();
+  const allTx = sortedTransactions();
+  const tx = ui.txFilterMode === "month" ? allTx.filter((t) => monthKeyOf(t.date) === ui.txFilterMonth) : allTx;
 
   const chartBlock = ui.graphMode === "all"
     ? `<div class="kb-chart-box">
@@ -706,7 +790,7 @@ function renderRecordTab() {
          ${categoryBarChartSVG(catSeries, hashColor(ui.catViewCategory || "その他", CATEGORY_PALETTE))}
        </div>`;
 
-  const txHtml = tx.length === 0 ? `<div class="kb-empty">記録がありません。ホームタブのボタンから追加しましょう。</div>` : `
+  const txHtml = tx.length === 0 ? `<div class="kb-empty">${ui.txFilterMode === "month" ? "この月の記録はありません。" : "記録がありません。ホームタブのボタンから追加しましょう。"}</div>` : `
     <div class="kb-txlist">
       ${tx.map((t) => `
         <div class="kb-tx-row">
@@ -722,6 +806,7 @@ function renderRecordTab() {
           <div class="kb-tx-amt kb-num" style="color:${t.type === "expense" ? "var(--coral)" : t.type === "income" ? "var(--mint-deep)" : "var(--ink-soft)"}">
             ${t.type === "expense" ? "−" : t.type === "income" ? "+" : ""}${formatYen(t.amount)}
           </div>
+          ${t.type !== "transfer" ? `<button class="kb-tx-del" onclick="C.copyTx('${t.id}')" title="コピーして新規入力">${icon("copy", 14)}</button>` : ""}
           <button class="kb-tx-del" onclick="C.deleteTx('${t.id}')" title="削除">${icon("trash", 14)}</button>
         </div>`).join("")}
     </div>`;
@@ -746,6 +831,11 @@ function renderRecordTab() {
     </div>
     <div class="kb-panel" style="margin-bottom:0">
       <div class="kb-panel-title"><span class="kb-panel-icon navy">${icon("transfer", 15)}</span><h2>入出金履歴</h2></div>
+      <div class="kb-toolbar">
+        <button class="kb-tabbtn ${ui.txFilterMode !== "month" ? "active" : ""}" onclick="C.setTxFilterMode('all')">全期間</button>
+        <button class="kb-tabbtn ${ui.txFilterMode === "month" ? "active" : ""}" onclick="C.setTxFilterMode('month')">月別</button>
+        ${ui.txFilterMode === "month" ? `<input type="month" class="kb-select" value="${ui.txFilterMonth}" onchange="C.setTxFilterMonth(this.value)" />` : ""}
+      </div>
       ${txHtml}
     </div>`;
 }
@@ -770,24 +860,6 @@ function renderOtherTab() {
       <button onclick="C.deleteCardConfirm('${c.id}')">${icon("trash", 14)}</button>
     </div>`).join("");
 
-  const nowKey = currentMonthKey();
-  const recurringRows = data.recurringExpenses.map((r) => {
-    const period = `${r.startMonth}〜${r.endMonth || "終了なし"}`;
-    const isActive = r.startMonth <= nowKey && (!r.endMonth || r.endMonth >= nowKey);
-    return `
-      <div class="kb-cat-manage-row" style="align-items:flex-start">
-        <span>
-          ${r.category ? `<span class="kb-tx-cat" style="background:${hashColor(r.category, CATEGORY_PALETTE)}">${escapeHtml(r.category)}</span>` : ""}
-          <b style="color:var(--navy)">${escapeHtml(r.name)}</b>　${formatYen(r.amount)}${isActive ? "" : `<span style="color:var(--ink-soft)">（現在は対象外）</span>`}
-          <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">${escapeHtml(recurringSourceLabel(r))}／${period}</div>
-        </span>
-        <button onclick="C.deleteRecurringConfirm('${r.id}')">${icon("trash", 14)}</button>
-      </div>`;
-  }).join("");
-
-  if (!ui.projectionMonth) ui.projectionMonth = nextMonthKeyOf(nowKey);
-  const projected = projectedNetWorth(ui.projectionMonth);
-
   return `
     <div class="kb-panel">
       <div class="kb-panel-title"><span class="kb-panel-icon coral">${icon("arrowUp", 15)}</span><h2>支出の種類を管理</h2></div>
@@ -810,20 +882,6 @@ function renderOtherTab() {
       <div class="kb-hint" style="margin-top:-2px">削除すると、紐づく取引記録も一緒に削除されます</div>
       ${data.accounts.length === 0 ? `<div class="kb-empty">島がありません</div>` : accountRows}
       ${data.cards.length ? `<div style="height:8px"></div>${cardRows}` : ""}
-    </div>
-    <div class="kb-panel">
-      <div class="kb-panel-title"><span class="kb-panel-icon coral">${icon("calendar", 15)}</span><h2>固定費（定期的な出費）</h2></div>
-      <div class="kb-hint" style="margin-top:-2px">現在有効な固定費の合計：${formatYen(activeRecurringMonthlyTotal())}／月</div>
-      ${data.recurringExpenses.length === 0 ? `<div class="kb-empty">登録された固定費はありません</div>` : recurringRows}
-      <button class="kb-add-btn" style="margin-top:10px" ${data.accounts.length === 0 ? "disabled" : ""} onclick="C.openRecurringModal()">${icon("plus", 14)} 固定費を追加</button>
-    </div>
-    <div class="kb-panel">
-      <div class="kb-panel-title"><span class="kb-panel-icon">${icon("compass", 15)}</span><h2>将来の資産予測</h2></div>
-      <div class="kb-toolbar">
-        <input type="month" class="kb-select" value="${ui.projectionMonth}" min="${nextMonthKeyOf(nowKey)}" onchange="C.setProjectionMonth(this.value)" />
-      </div>
-      <div class="kb-netvalue kb-num" style="font-size:22px;color:var(--navy)">${formatYen(projected)}</div>
-      <div class="kb-hint" style="margin:8px 0 0">現在の純資産に、登録済みの固定費を反映した見込み額です。収入や他の支出は含みません。</div>
     </div>
     <div class="kb-panel">
       <div class="kb-panel-title"><span class="kb-panel-icon">${icon(drive.connected ? "cloud" : "cloudOff", 15)}</span><h2>クラウド同期（Google Drive）</h2></div>
@@ -897,6 +955,7 @@ function renderApp() {
 
 /* ---------- long-press grid reorder (2D: for both list and grid layouts) ---------- */
 let dragSession = { id: null, kind: null, timer: null, active: false, startX: 0, startY: 0 };
+let justDragged = false;
 function setupReorder() {
   document.querySelectorAll("[data-reorder-item]").forEach((row) => {
     const handle = row.querySelector("[data-reorder-handle]") || row;
@@ -961,6 +1020,10 @@ function cancelDrag() {
     const el = document.querySelector(`[data-reorder-item="${dragSession.kind}"][data-id="${dragSession.id}"]`);
     if (el) { el.classList.remove("kb-dragging"); el.style.transform = ""; }
   }
+  if (dragSession.active) {
+    justDragged = true;
+    setTimeout(() => { justDragged = false; }, 80);
+  }
   dragSession = { id: null, kind: null, timer: null, active: false, startX: 0, startY: 0 };
 }
 
@@ -977,6 +1040,28 @@ function mountModal(html) {
   document.body.appendChild(div);
   const backdrop = div.querySelector(".kb-modal-backdrop");
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) closeModal(); });
+}
+
+function islandTap(e, id) {
+  if (justDragged) return;
+  if (e.target.closest("button")) return;
+  openIslandActions(id);
+}
+function openIslandActions(id) {
+  const acc = getAccount(id);
+  if (!acc) return;
+  mountModal(`
+    <div class="kb-modal-backdrop">
+      <div class="kb-modal" style="max-width:340px" onclick="event.stopPropagation()">
+        <button class="kb-modal-close" onclick="C.closeModal()">${icon("x", 18)}</button>
+        <h3>${escapeHtml(acc.name)}</h3>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <button class="kb-big-btn income" style="flex-direction:row;justify-content:center;padding:13px" onclick="C.openTxModal('income','${id}')">${icon("arrowDown", 18)} 入金</button>
+          <button class="kb-big-btn transfer" style="flex-direction:row;justify-content:center;padding:13px" onclick="C.openTxModal('transfer','${id}')">${icon("transfer", 18)} 移動</button>
+          <button class="kb-big-btn expense" style="flex-direction:row;justify-content:center;padding:13px" onclick="C.openTxModal('expense','${id}')">${icon("arrowUp", 18)} 使用</button>
+        </div>
+      </div>
+    </div>`);
 }
 
 function openConfirmModal(message, onConfirm) {
@@ -1094,53 +1179,77 @@ function deleteRecurringConfirm(id) {
   openConfirmModal(`「${r.name}」の固定費登録を削除します。今後は自動記録されなくなります（すでに記録済みの取引はそのまま残ります）。よろしいですか？`, () => removeRecurringExpense(id));
 }
 
-function openRecurringModal() {
+function openRecurringModal(existingId) {
   if (data.accounts.length === 0) return;
-  let category = "";
-  let sourceType = "account";
-  let accountId = data.accounts[0].id;
-  let cardId = "";
-  let hasEnd = false;
-  const cats = data.expenseCats;
+  const existing = existingId ? data.recurringExpenses.find((r) => r.id === existingId) : null;
+  let type = existing ? existing.type : "expense";
+  let category = existing ? (existing.category || "") : "";
+  let sourceType = existing && existing.cardId ? "card" : "account";
+  let accountId = (existing && existing.accountId) || data.accounts[0].id;
+  let cardId = (existing && existing.cardId) || "";
+  let hasEnd = !!(existing && existing.endMonth);
+  const nowKey = currentMonthKey();
 
+  function cats() { return type === "expense" ? data.expenseCats : data.incomeCats; }
+  function typeChipsHtml() {
+    return `
+      <div class="kb-chip ${type === "expense" ? "active" : ""}" data-type="expense">支出（固定費）</div>
+      <div class="kb-chip ${type === "income" ? "active" : ""}" data-type="income">収入（固定収入）</div>`;
+  }
   function catChipsHtml() {
-    return cats.map((c) => `<div class="kb-chip ${category === c ? "active" : ""}" data-cat="${escapeHtml(c)}">${escapeHtml(c)}</div>`).join("");
+    return cats().map((c) => `<div class="kb-chip ${category === c ? "active" : ""}" data-cat="${escapeHtml(c)}">${escapeHtml(c)}</div>`).join("");
   }
   function sourceTypeChipsHtml() {
     return `
       <div class="kb-chip ${sourceType === "account" ? "active" : ""}" data-src="account">口座・手持ち</div>
-      <div class="kb-chip ${sourceType === "card" ? "active" : ""}" data-src="card" style="opacity:${data.cards.length ? 1 : 0.4};pointer-events:${data.cards.length ? "auto" : "none"}">カード</div>`;
+      <div class="kb-chip ${sourceType === "card" ? "active" : ""}" data-src="card" style="opacity:${data.cards.length && type === "expense" ? 1 : 0.4};pointer-events:${data.cards.length && type === "expense" ? "auto" : "none"}">カード</div>`;
   }
   function sourceFieldHtml() {
     if (sourceType === "account") {
-      return `<select id="recAccountSelect">${data.accounts.map((a) => `<option value="${a.id}">${escapeHtml(a.name)}</option>`).join("")}</select>`;
+      return `<select id="recAccountSelect">${data.accounts.map((a) => `<option value="${a.id}" ${a.id === accountId ? "selected" : ""}>${escapeHtml(a.name)}</option>`).join("")}</select>`;
     }
-    return `<select id="recCardSelect"><option value="">選択してください</option>${data.cards.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("")}</select>`;
+    return `<select id="recCardSelect"><option value="">選択してください</option>${data.cards.map((c) => `<option value="${c.id}" ${c.id === cardId ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}</select>`;
   }
 
-  const nowKey = currentMonthKey();
   mountModal(`
     <div class="kb-modal-backdrop">
       <div class="kb-modal" onclick="event.stopPropagation()">
         <button class="kb-modal-close" onclick="C.closeModal()">${icon("x", 18)}</button>
-        <h3 style="color:var(--coral)">固定費を追加</h3>
-        <div class="kb-field"><label>名前</label><input type="text" id="recName" placeholder="例：家賃、〇〇サブスク" /></div>
-        <div class="kb-field"><label>金額（月あたり）</label><input type="number" min="0" id="recAmount" placeholder="0" /></div>
-        <div class="kb-field"><label>種類</label><div class="kb-chip-group" id="recCatChips">${catChipsHtml()}</div></div>
-        <div class="kb-field">
-          <label>支払い元</label>
-          <div class="kb-chip-group" id="recSourceTypeChips" style="margin-bottom:8px">${sourceTypeChipsHtml()}</div>
+        <h3 style="color:var(--coral)">${existing ? "固定費・固定収入を編集" : "固定費・固定収入を追加"}</h3>
+        <div class="kb-field"><label>種類</label><div class="kb-chip-group" id="recTypeChips">${typeChipsHtml()}</div></div>
+        <div class="kb-field"><label>名前</label><input type="text" id="recName" placeholder="例：家賃、〇〇サブスク、家賃収入" value="${escapeHtml(existing ? existing.name : "")}" /></div>
+        <div class="kb-field"><label>金額（月あたり）</label><input type="number" min="0" id="recAmount" placeholder="0" value="${existing ? existing.amount : ""}" /></div>
+        <div class="kb-field"><label>カテゴリ</label><div class="kb-chip-group" id="recCatChips">${catChipsHtml()}</div></div>
+        <div class="kb-field" id="recSourceWrap">
+          <label id="recSourceLabel">${type === "income" ? "入金先" : "支払い元"}</label>
+          <div class="kb-chip-group" id="recSourceTypeChips" style="margin-bottom:8px;${type === "income" ? "display:none" : ""}">${sourceTypeChipsHtml()}</div>
           <div id="recSourceField">${sourceFieldHtml()}</div>
         </div>
-        <div class="kb-field"><label>開始月</label><input type="month" id="recStart" value="${nowKey}" /></div>
+        <div class="kb-field"><label>開始月</label><input type="month" id="recStart" value="${existing ? existing.startMonth : nowKey}" /></div>
         <div class="kb-field">
-          <label><input type="checkbox" id="recHasEnd" style="width:auto;margin-right:6px" />終了月を設定する</label>
-          <input type="month" id="recEnd" value="${nowKey}" style="margin-top:8px;display:none" />
+          <label><input type="checkbox" id="recHasEnd" style="width:auto;margin-right:6px" ${hasEnd ? "checked" : ""} />終了月を設定する</label>
+          <input type="month" id="recEnd" value="${existing && existing.endMonth ? existing.endMonth : nowKey}" style="margin-top:8px;display:${hasEnd ? "block" : "none"}" />
         </div>
-        <button class="kb-submit" id="recSubmitBtn" style="background:var(--coral)">追加する</button>
+        <button class="kb-submit" id="recSubmitBtn" style="background:var(--coral)">${existing ? "更新する" : "追加する"}</button>
       </div>
     </div>`);
 
+  function refreshSourceSection() {
+    document.getElementById("recSourceLabel").textContent = type === "income" ? "入金先" : "支払い元";
+    document.getElementById("recSourceTypeChips").style.display = type === "income" ? "none" : "flex";
+    if (type === "income") sourceType = "account";
+    document.getElementById("recSourceTypeChips").innerHTML = sourceTypeChipsHtml();
+    document.getElementById("recSourceField").innerHTML = sourceFieldHtml();
+  }
+
+  document.getElementById("recTypeChips").addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-type]"); if (!chip) return;
+    type = chip.dataset.type;
+    category = "";
+    document.getElementById("recTypeChips").innerHTML = typeChipsHtml();
+    document.getElementById("recCatChips").innerHTML = catChipsHtml();
+    refreshSourceSection();
+  });
   document.getElementById("recCatChips").addEventListener("click", (e) => {
     const chip = e.target.closest("[data-cat]"); if (!chip) return;
     category = chip.dataset.cat;
@@ -1163,26 +1272,29 @@ function openRecurringModal() {
     const startMonth = document.getElementById("recStart").value || nowKey;
     const endMonth = hasEnd ? (document.getElementById("recEnd").value || null) : null;
     let recAccountId = null, recCardId = null;
-    if (sourceType === "card") {
+    if (sourceType === "card" && type === "expense") {
       recCardId = document.getElementById("recCardSelect").value;
       if (!recCardId) return;
     } else {
       recAccountId = document.getElementById("recAccountSelect").value;
       if (!recAccountId) return;
     }
-    addRecurringExpense({ name, amount, category: category || null, accountId: recAccountId, cardId: recCardId, startMonth, endMonth });
+    const payload = { type, name, amount, category: category || null, accountId: recAccountId, cardId: recCardId, startMonth, endMonth };
+    if (existing) updateRecurringExpense(existing.id, payload);
+    else addRecurringExpense(payload);
     closeModal();
   });
 }
 
-function openTxModal(mode, presetAccountId) {
+function openTxModal(mode, presetAccountId, prefill) {
+  prefill = prefill || {};
   const accentMap = { expense: "var(--coral)", income: "var(--mint-deep)", transfer: "var(--wash)" };
   const titleMap = { expense: "出費を記録", income: "入金を記録", transfer: "資金移動" };
-  let category = "";
-  let sourceType = "account";
-  let accountId = presetAccountId || (data.accounts[0] && data.accounts[0].id) || "";
-  let cardId = "";
-  let toAccountId = (data.accounts.find((a) => a.id !== accountId) || {}).id || "";
+  let category = prefill.category || "";
+  let sourceType = prefill.cardId ? "card" : "account";
+  let accountId = prefill.accountId || presetAccountId || (data.accounts[0] && data.accounts[0].id) || "";
+  let cardId = prefill.cardId || "";
+  let toAccountId = prefill.toAccountId || (data.accounts.find((a) => a.id !== accountId) || {}).id || "";
   const cats = mode === "expense" ? data.expenseCats : data.incomeCats;
 
   function catChipsHtml() {
@@ -1242,8 +1354,8 @@ function openTxModal(mode, presetAccountId) {
         </div>`;
     }
     return `
-      <div class="kb-field"><label>金額</label><input type="number" min="0" inputmode="numeric" placeholder="0" id="txAmount" /></div>
-      <div class="kb-field"><label>用途・メモ</label><input type="text" placeholder="例：スーパーで買い物" id="txMemo" /></div>
+      <div class="kb-field"><label>金額</label><input type="number" min="0" inputmode="numeric" placeholder="0" id="txAmount" value="${prefill.amount != null ? prefill.amount : ""}" /></div>
+      <div class="kb-field"><label>用途・メモ</label><input type="text" placeholder="例：スーパーで買い物" id="txMemo" value="${escapeHtml(prefill.memo || "")}" /></div>
       <div class="kb-field"><label>日付</label><input type="date" id="txDate" value="${todayStr()}" /></div>
       ${categorySection}
       ${sourceSection}
@@ -1254,13 +1366,12 @@ function openTxModal(mode, presetAccountId) {
     <div class="kb-modal-backdrop">
       <div class="kb-modal" onclick="event.stopPropagation()">
         <button class="kb-modal-close" onclick="C.closeModal()">${icon("x", 18)}</button>
-        <h3 style="color:${accentMap[mode]}">${titleMap[mode]}</h3>
+        <h3 style="color:${accentMap[mode]}">${titleMap[mode]}${prefill.amount != null ? "（コピー）" : ""}</h3>
         <div id="txModalBody">${bodyHtml()}</div>
       </div>
     </div>`);
 
   function wire() {
-    const body = document.getElementById("txModalBody");
     const catChips = document.getElementById("txCatChips");
     if (catChips) catChips.addEventListener("click", (e) => {
       const chip = e.target.closest("[data-cat]"); if (!chip) return;
@@ -1282,14 +1393,11 @@ function openTxModal(mode, presetAccountId) {
     if (srcChips) srcChips.addEventListener("click", (e) => {
       const chip = e.target.closest("[data-src]"); if (!chip) return;
       sourceType = chip.dataset.src;
-      body.innerHTML = bodyHtml();
-      wire();
-    });
-    const cardSelect = document.getElementById("txCardSelect");
-    if (cardSelect) cardSelect.addEventListener("change", (e) => {
-      cardId = e.target.value;
+      document.getElementById("txSourceTypeChips").innerHTML = sourceTypeChipsHtml();
       document.getElementById("txSourceField").innerHTML = sourceFieldHtml();
+      wireSourceField();
     });
+    wireSourceField();
     const submitBtn = document.getElementById("txSubmitBtn");
     submitBtn.addEventListener("click", () => {
       const amount = Number(document.getElementById("txAmount").value);
@@ -1320,6 +1428,14 @@ function openTxModal(mode, presetAccountId) {
       renderApp();
     });
   }
+  function wireSourceField() {
+    const cardSelect = document.getElementById("txCardSelect");
+    if (cardSelect) cardSelect.addEventListener("change", (e) => {
+      cardId = e.target.value;
+      document.getElementById("txSourceField").innerHTML = sourceFieldHtml();
+      wireSourceField();
+    });
+  }
   wire();
 }
 
@@ -1340,12 +1456,16 @@ window.C = {
   },
   openTxModal(mode, presetAccountId) { openTxModal(mode, presetAccountId); },
   openAccountModal() { openAccountModal(); },
+  islandTap(e, id) { islandTap(e, id); },
+  copyTx(id) { copyTx(id); },
   openCardModal() { openCardModal(); },
   deleteAccountConfirm(id) { deleteAccountConfirm(id); },
   deleteCardConfirm(id) { deleteCardConfirm(id); },
-  openRecurringModal() { openRecurringModal(); },
+  openRecurringModal(existingId) { openRecurringModal(existingId); },
   deleteRecurringConfirm(id) { deleteRecurringConfirm(id); },
-  setProjectionMonth(v) { ui.projectionMonth = v; renderApp(); },
+  setNetWorthViewMonth(v) { ui.netWorthViewMonth = v; renderApp(); },
+  setTxFilterMode(m) { ui.txFilterMode = m; renderApp(); },
+  setTxFilterMonth(v) { ui.txFilterMonth = v; renderApp(); },
   connectDrive() { connectDrive(true); },
   disconnectDrive() { disconnectDrive(); },
   manualDriveUpload() { manualDriveUpload(); },
