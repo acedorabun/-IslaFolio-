@@ -424,7 +424,7 @@ function copyTx(id) {
   const tx = data.transactions.find((t) => t.id === id);
   if (!tx) return;
   openTxModal(tx.type, null, {
-    amount: tx.amount, memo: tx.memo, category: tx.category,
+    amount: tx.amount, memo: tx.memo, category: tx.category, date: tx.date,
     accountId: tx.accountId, cardId: tx.cardId, toAccountId: tx.toAccountId,
   });
 }
@@ -548,6 +548,29 @@ function netWorthAtMonth(mk) {
   if (mk > nowKey) return projectedNetWorth(mk);
   const cutoffExclusive = `${nextMonthKeyOf(mk)}-01`;
   return data.accounts.reduce((sum, a) => sum + getAccountBalanceBefore(a.id, cutoffExclusive), 0);
+}
+function projectedAccountBalance(accountId, targetMonth) {
+  let bal = getAccountBalance(accountId);
+  const nowKey = currentMonthKey();
+  if (!targetMonth || targetMonth <= nowKey) return bal;
+  const months = monthRangeInclusive(nextMonthKeyOf(nowKey), targetMonth);
+  data.recurringExpenses.forEach((r) => {
+    const resolvedAcc = r.cardId ? ((getCard(r.cardId) || {}).linkedAccountId) : r.accountId;
+    if (resolvedAcc !== accountId) return;
+    months.forEach((mk) => {
+      if (mk < r.startMonth) return;
+      if (r.endMonth && mk > r.endMonth) return;
+      bal += r.type === "income" ? r.amount : -r.amount;
+    });
+  });
+  return bal;
+}
+function accountValueAtMonth(accountId, mk) {
+  const nowKey = currentMonthKey();
+  if (!mk || mk === nowKey) return getAccountBalance(accountId);
+  if (mk > nowKey) return projectedAccountBalance(accountId, mk);
+  const cutoffExclusive = `${nextMonthKeyOf(mk)}-01`;
+  return getAccountBalanceBefore(accountId, cutoffExclusive);
 }
 
 /* ---------- mutations ---------- */
@@ -724,11 +747,11 @@ function renderHeader() {
           <span class="tagline">資産の島々</span>
         </div>
       </div>
-      <div class="kb-netbadge">
+      <div class="kb-netbadge" onclick="C.netBadgeTap(event)" style="cursor:pointer">
         <div class="kb-net-dot"></div>
         <div>
           <div class="kb-netlabel">${label}
-            <input type="month" value="${ui.netWorthViewMonth}" onchange="C.setNetWorthViewMonth(this.value)" style="border:none;background:none;font-size:10.5px;color:var(--ink-soft);font-family:inherit;padding:0;margin-left:4px" />
+            <input type="month" value="${ui.netWorthViewMonth}" onchange="C.setNetWorthViewMonth(this.value)" onclick="event.stopPropagation()" style="border:none;background:none;font-size:10.5px;color:var(--ink-soft);font-family:inherit;padding:0;margin-left:4px" />
           </div>
           <div class="kb-netvalue kb-num">${formatYen(viewed)}</div>
         </div>
@@ -767,7 +790,7 @@ function renderHomeTab() {
   const docksHtml = data.cards.map((c) => {
     const acc = getAccount(c.linkedAccountId);
     return `
-      <div class="kb-dock" data-reorder-item="card" data-id="${c.id}" data-reorder-handle style="--dock-color:${c.color}">
+      <div class="kb-dock" data-reorder-item="card" data-id="${c.id}" data-reorder-handle style="--dock-color:${c.color}" onclick="C.dockTap(event, '${c.id}')">
         <div class="kb-dock-top">
           <span class="kb-dock-icon">${icon("card", 13)}</span>
           <span class="kb-dock-name">${escapeHtml(c.name)}</span>
@@ -812,7 +835,7 @@ function renderHomeTab() {
     </div>
     <div class="kb-panel">
       <div class="kb-panel-title"><span class="kb-panel-icon navy">${icon("card", 15)}</span><h2>カード</h2></div>
-      ${data.cards.length > 1 ? `<div class="kb-hint">長押しすると並び替えできます</div>` : ""}
+      <div class="kb-hint">タップで出費を記録${data.cards.length > 1 ? "、長押しで並び替え" : ""}できます</div>
       <div class="kb-dock-grid">
         ${docksHtml}
         <button class="kb-add-island" style="min-height:auto;padding:20px 0" ${data.accounts.length === 0 ? "disabled" : ""} onclick="C.openCardModal()">${icon("plus", 18)}<span>カードを追加</span></button>
@@ -895,7 +918,8 @@ function renderRecordTab() {
         <button class="kb-tabbtn ${ui.txFilterMode === "month" ? "active" : ""}" onclick="C.setTxFilterMode('month')">月別</button>
         ${ui.txFilterMode === "month" ? `<input type="month" class="kb-select" value="${ui.txFilterMonth}" onchange="C.setTxFilterMonth(this.value)" />` : ""}
       </div>
-      ${txHtml}
+      ${ui.txFilterMode === "month" ? `<div class="kb-hint" style="margin-top:-4px">左右にスワイプで前後の月へ移動できます</div>` : ""}
+      <div id="txSwipeArea">${txHtml}</div>
     </div>`;
 }
 
@@ -1010,6 +1034,32 @@ function renderApp() {
   else body = renderOtherTab();
   app.innerHTML = renderHeader() + `<div>${body}</div>` + renderBottomNav();
   if (ui.activeTab === "home") setupReorder();
+  if (ui.activeTab === "record") setupTxSwipe();
+}
+
+/* ---------- swipe navigation for month-filtered history ---------- */
+function setupTxSwipe() {
+  const el = document.getElementById("txSwipeArea");
+  if (!el) return;
+  let sx = 0, sy = 0, active = false;
+  el.addEventListener("pointerdown", (e) => { sx = e.clientX; sy = e.clientY; active = true; });
+  el.addEventListener("pointerup", (e) => {
+    if (!active) return;
+    active = false;
+    const dx = e.clientX - sx, dy = e.clientY - sy;
+    if (ui.txFilterMode === "month" && Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      shiftTxFilterMonth(dx < 0 ? 1 : -1);
+    }
+  });
+}
+function shiftTxFilterMonth(delta) {
+  const mk = ui.txFilterMonth || currentMonthKey();
+  let [y, m] = mk.split("-").map(Number);
+  m += delta;
+  while (m > 12) { m -= 12; y += 1; }
+  while (m < 1) { m += 12; y -= 1; }
+  ui.txFilterMonth = `${y}-${String(m).padStart(2, "0")}`;
+  renderApp();
 }
 
 /* ---------- long-press grid reorder (2D: for both list and grid layouts) ---------- */
@@ -1105,6 +1155,42 @@ function islandTap(e, id) {
   if (justDragged) return;
   if (e.target.closest("button")) return;
   openIslandActions(id);
+}
+function netBadgeTap(e) {
+  if (e.target.closest("input")) return;
+  openNetWorthDetail();
+}
+function openNetWorthDetail() {
+  const mk = ui.netWorthViewMonth || currentMonthKey();
+  const nowKey = currentMonthKey();
+  const kindLabel = mk > nowKey ? "資産予測" : mk < nowKey ? "時点の記録" : "現在の内訳";
+  const rows = data.accounts.map((acc) => {
+    const meta = TYPE_META[acc.type] || TYPE_META.bank;
+    const val = accountValueAtMonth(acc.id, mk);
+    return `
+      <div class="kb-cat-manage-row">
+        <span>${icon(meta.icon, 13)} ${escapeHtml(acc.name)}</span>
+        <span class="kb-num" style="color:var(--navy)">${formatYen(val)}</span>
+      </div>`;
+  }).join("");
+  mountModal(`
+    <div class="kb-modal-backdrop">
+      <div class="kb-modal" onclick="event.stopPropagation()">
+        <button class="kb-modal-close" onclick="C.closeModal()">${icon("x", 18)}</button>
+        <h3>${monthDisplayLabel(mk)}の${kindLabel}</h3>
+        ${data.accounts.length === 0 ? `<div class="kb-empty">島がありません</div>` : rows}
+        <div class="kb-cat-manage-row" style="background:var(--wash-soft);border:none;margin-top:10px">
+          <span style="font-weight:700;color:var(--navy)">合計</span>
+          <span class="kb-num" style="color:var(--navy)">${formatYen(netWorthAtMonth(mk))}</span>
+        </div>
+        ${mk > nowKey ? `<div class="kb-hint" style="margin:10px 0 0">登録済みの固定費・固定収入を反映した見込み額です。</div>` : ""}
+      </div>
+    </div>`);
+}
+function dockTap(e, id) {
+  if (justDragged) return;
+  if (e.target.closest("button")) return;
+  openTxModal("expense", null, { cardId: id });
 }
 function openIslandActions(id) {
   const acc = getAccount(id);
@@ -1416,7 +1502,7 @@ function openTxModal(mode, presetAccountId, prefill) {
     return `
       <div class="kb-field"><label>金額</label><input type="text" inputmode="numeric" placeholder="0" id="txAmount" value="${prefill.amount != null ? Number(prefill.amount).toLocaleString("ja-JP") : ""}" oninput="formatAmountInput(this)" /></div>
       <div class="kb-field"><label>用途・メモ</label><input type="text" placeholder="例：スーパーで買い物" id="txMemo" value="${escapeHtml(prefill.memo || "")}" /></div>
-      <div class="kb-field"><label>日付</label><input type="date" id="txDate" value="${todayStr()}" /></div>
+      <div class="kb-field"><label>日付</label><input type="date" id="txDate" value="${prefill.date || todayStr()}" /></div>
       ${categorySection}
       ${sourceSection}
       <button class="kb-submit" id="txSubmitBtn" style="background:${accentMap[mode]}">記録する</button>`;
@@ -1520,6 +1606,8 @@ window.C = {
   openTxModal(mode, presetAccountId) { openTxModal(mode, presetAccountId); },
   openAccountModal() { openAccountModal(); },
   islandTap(e, id) { islandTap(e, id); },
+  dockTap(e, id) { dockTap(e, id); },
+  netBadgeTap(e) { netBadgeTap(e); },
   copyTx(id) { copyTx(id); },
   openCardModal() { openCardModal(); },
   deleteAccountConfirm(id) { deleteAccountConfirm(id); },

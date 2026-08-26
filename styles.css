@@ -91,7 +91,6 @@ svg.icon.filled { fill: currentColor; stroke: none; }
   box-shadow: var(--shadow-island);
   cursor: grab;
   user-select: none;
-  touch-action: none;
   min-height: 128px;
   display: flex;
   flex-direction: column;
@@ -127,7 +126,7 @@ svg.icon.filled { fill: currentColor; stroke: none; }
 .kb-dock-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
 .kb-dock {
   border-radius: 16px; padding: 12px 12px 11px; background: var(--card); border: 1px solid var(--line);
-  box-shadow: var(--shadow-sm); cursor: grab; user-select: none; touch-action: none; position: relative;
+  box-shadow: var(--shadow-sm); cursor: grab; user-select: none; position: relative;
 }
 .kb-dock-top { display:flex; align-items:center; gap:8px; }
 .kb-dock-icon { width:26px; height:26px; border-radius:8px; background: var(--dock-color, var(--wash)); color:#fff; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
