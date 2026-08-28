@@ -54,6 +54,8 @@ const ICONS = {
   cloudOff: '<path d="M17.5 19a4.5 4.5 0 0 0 .5-8.97"/><path d="M9.2 5.2A6 6 0 0 1 17.9 10.5"/><path d="M5.6 8A4 4 0 0 0 6 19h9.5"/><line x1="2" y1="2" x2="22" y2="22"/>',
   check: '<polyline points="20 6 9 17 4 12"/>',
   copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+  chevronUp: '<polyline points="18 15 12 9 6 15"/>',
 };
 function icon(name, size) {
   size = size || 16;
@@ -140,11 +142,13 @@ let drive = {
   tokenClient: null,
   token: null,
   connected: false,
+  needsReauth: false,
   busy: false,
   lastSync: null,
   autoSync: localStorage.getItem(DRIVE_AUTOSYNC_KEY) !== "0",
 };
 let driveAutoSyncTimer = null;
+let reauthPromptOpen = false;
 
 function loadData() {
   try {
@@ -192,6 +196,7 @@ function initGoogleClient() {
       if (resp && resp.access_token) {
         drive.token = resp.access_token;
         drive.connected = true;
+        drive.needsReauth = false;
         localStorage.setItem(DRIVE_CONNECTED_KEY, "1");
         handleDriveConnected();
       } else {
@@ -228,6 +233,7 @@ function disconnectDrive() {
   }
   drive.token = null;
   drive.connected = false;
+  drive.needsReauth = false;
   drive.lastSync = null;
   localStorage.removeItem(DRIVE_CONNECTED_KEY);
   ui.driveStatusMsg = { type: "success", text: "Google Driveとの連携を解除しました。" };
@@ -254,6 +260,7 @@ async function handleDriveConnected() {
     }
     drive.lastSync = new Date().toISOString();
   } catch (e) {
+    if (e && e.status === 401) { onDriveAuthError(); return; }
     ui.driveStatusMsg = { type: "error", text: `Driveとの同期確認に失敗しました（${driveErrorText(e)}）。` };
   }
   renderApp();
@@ -265,6 +272,30 @@ function driveErrorText(e) {
   if (e && e.detail) return `${e.status}: ${e.detail}`;
   if (e && e.message) return e.message;
   return "不明なエラー";
+}
+function onDriveAuthError() {
+  drive.needsReauth = true;
+  renderApp();
+  if (!reauthPromptOpen) openReauthPrompt();
+}
+function openReauthPrompt() {
+  reauthPromptOpen = true;
+  mountModal(`
+    <div class="kb-modal-backdrop">
+      <div class="kb-modal" style="max-width:340px" onclick="event.stopPropagation()">
+        <button class="kb-modal-close" onclick="C.closeReauthPrompt()">${icon("x", 18)}</button>
+        <h3 style="color:var(--coral)">${icon("cloudOff", 17)} Google連携の期限切れ</h3>
+        <p style="font-size:13.5px;line-height:1.7;margin-top:0">Googleとの連携の有効期限が切れたため、自動保存が止まっています。再度ログインしますか？</p>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="kb-outline-btn" style="flex:1;justify-content:center" onclick="C.closeReauthPrompt()">あとで</button>
+          <button class="kb-submit" style="flex:1;margin-top:0" onclick="C.closeReauthPrompt();C.connectDrive()">今すぐログイン</button>
+        </div>
+      </div>
+    </div>`);
+}
+function closeReauthPrompt() {
+  reauthPromptOpen = false;
+  closeModal();
 }
 async function driveApiFetch(url, options) {
   options = options || {};
@@ -332,7 +363,11 @@ function scheduleDriveAutoSync() {
     drive.busy = true;
     driveUpload()
       .then((syncedAt) => { localStorage.setItem(DRIVE_LAST_SYNC_KEY, syncedAt); drive.lastSync = new Date().toISOString(); drive.busy = false; renderApp(); })
-      .catch((e) => { drive.busy = false; ui.driveStatusMsg = { type: "error", text: `自動保存に失敗しました（${driveErrorText(e)}）。` }; renderApp(); });
+      .catch((e) => {
+        drive.busy = false;
+        if (e && e.status === 401) { onDriveAuthError(); return; }
+        ui.driveStatusMsg = { type: "error", text: `自動保存に失敗しました（${driveErrorText(e)}）。` }; renderApp();
+      });
   }, 4000);
 }
 function manualDriveUpload() {
@@ -340,7 +375,11 @@ function manualDriveUpload() {
   drive.busy = true; renderApp();
   driveUpload()
     .then((syncedAt) => { localStorage.setItem(DRIVE_LAST_SYNC_KEY, syncedAt); drive.lastSync = new Date().toISOString(); drive.busy = false; ui.driveStatusMsg = { type: "success", text: "Driveに保存しました。" }; renderApp(); })
-    .catch((e) => { drive.busy = false; ui.driveStatusMsg = { type: "error", text: `Driveへの保存に失敗しました（${driveErrorText(e)}）。` }; renderApp(); });
+    .catch((e) => {
+      drive.busy = false;
+      if (e && e.status === 401) { onDriveAuthError(); return; }
+      ui.driveStatusMsg = { type: "error", text: `Driveへの保存に失敗しました（${driveErrorText(e)}）。` }; renderApp();
+    });
 }
 function manualDriveDownload() {
   if (!drive.connected) return;
@@ -357,7 +396,11 @@ function manualDriveDownload() {
         drive.lastSync = new Date().toISOString();
         renderApp();
       })
-      .catch((e) => { drive.busy = false; ui.driveStatusMsg = { type: "error", text: `Driveからの取得に失敗しました（${driveErrorText(e)}）。` }; renderApp(); });
+      .catch((e) => {
+        drive.busy = false;
+        if (e && e.status === 401) { onDriveAuthError(); return; }
+        ui.driveStatusMsg = { type: "error", text: `Driveからの取得に失敗しました（${driveErrorText(e)}）。` }; renderApp();
+      });
   });
 }
 function toggleDriveAutoSync() {
@@ -394,11 +437,22 @@ function availableYears() {
   s.add(String(new Date().getFullYear()));
   return Array.from(s).sort().reverse();
 }
+function monthsBetween(a, b) {
+  const [ay, am] = a.split("-").map(Number);
+  const [by, bm] = b.split("-").map(Number);
+  return (by - ay) * 12 + (bm - am);
+}
+function recurringOccursInMonth(r, mk) {
+  if (mk < r.startMonth) return false;
+  if (r.endMonth && mk > r.endMonth) return false;
+  const interval = r.intervalMonths || 1;
+  if (interval <= 1) return true;
+  return monthsBetween(r.startMonth, mk) % interval === 0;
+}
 function recurringMonthlyTotals(mk) {
   let income = 0, expense = 0;
   data.recurringExpenses.forEach((r) => {
-    if (mk < r.startMonth) return;
-    if (r.endMonth && mk > r.endMonth) return;
+    if (!recurringOccursInMonth(r, mk)) return;
     if (r.type === "income") income += r.amount; else expense += r.amount;
   });
   return { income, expense };
@@ -410,15 +464,25 @@ function addMonths(mk, offset) {
   while (m < 1) { m += 12; y -= 1; }
   return `${y}-${String(m).padStart(2, "0")}`;
 }
-function windowMonthlyStats(centerMonth) {
+function timelineRange() {
   const nowKey = currentMonthKey();
-  const months = [];
-  for (let offset = -5; offset <= 6; offset++) {
-    const mk = addMonths(centerMonth, offset);
+  let earliest = nowKey;
+  data.transactions.forEach((t) => { const mk = monthKeyOf(t.date); if (mk < earliest) earliest = mk; });
+  data.recurringExpenses.forEach((r) => { if (r.startMonth < earliest) earliest = r.startMonth; });
+  earliest = addMonths(earliest, -3);
+  const minEarliest = addMonths(nowKey, -18);
+  if (earliest > minEarliest) earliest = minEarliest;
+  const latest = addMonths(nowKey, 18);
+  return { start: earliest, end: latest };
+}
+function timelineMonthlyStats() {
+  const { start, end } = timelineRange();
+  const nowKey = currentMonthKey();
+  const months = monthRangeInclusive(start, end).map((mk) => {
     const m = parseInt(mk.slice(5, 7), 10);
     const label = m === 1 ? `${mk.slice(0, 4)}年1月` : `${m}月`;
-    months.push({ month: mk, label, income: 0, expense: 0, projected: mk > nowKey });
-  }
+    return { month: mk, label, income: 0, expense: 0, projected: mk > nowKey };
+  });
   const byKey = {}; months.forEach((mo) => (byKey[mo.month] = mo));
   data.transactions.forEach((tx) => {
     const mk = monthKeyOf(tx.date);
@@ -467,9 +531,23 @@ function sourceLabel(tx) {
 function copyTx(id) {
   const tx = data.transactions.find((t) => t.id === id);
   if (!tx) return;
+  pendingScrollTxId = id;
+  if (ui.txFilterMode === "month") ui.txFilterMonth = monthKeyOf(tx.date);
   openTxModal(tx.type, null, {
     amount: tx.amount, memo: tx.memo, category: tx.category, date: tx.date,
     accountId: tx.accountId, cardId: tx.cardId, toAccountId: tx.toAccountId,
+  });
+}
+function editTx(id) {
+  const tx = data.transactions.find((t) => t.id === id);
+  if (!tx) return;
+  closeModal();
+  pendingScrollTxId = id;
+  if (ui.txFilterMode === "month") ui.txFilterMonth = monthKeyOf(tx.date);
+  openTxModal(tx.type, null, {
+    amount: tx.amount, memo: tx.memo, category: tx.category, date: tx.date,
+    accountId: tx.accountId, cardId: tx.cardId, toAccountId: tx.toAccountId,
+    editId: tx.id,
   });
 }
 function deleteTxConfirm(id) {
@@ -498,9 +576,10 @@ function openTxDetail(id) {
         <div class="kb-field"><label>${tx.type === "transfer" ? "移動元 → 移動先" : tx.type === "income" ? "入金先" : "支払い元"}</label><div style="font-size:14px">${escapeHtml(sourceLabel(tx))}</div></div>
         <div class="kb-field"><label>金額</label><div class="kb-num" style="font-size:19px;color:${accent}">${tx.type === "expense" ? "−" : tx.type === "income" ? "+" : ""}${formatYen(tx.amount)}</div></div>
         <div style="display:flex;gap:8px;margin-top:8px">
-          ${tx.type !== "transfer" ? `<button class="kb-outline-btn" style="flex:1;justify-content:center" onclick="C.copyTx('${tx.id}')">${icon("copy", 15)} コピーして入力</button>` : ""}
-          <button class="kb-danger-btn" style="flex:1" onclick="C.deleteTxConfirm('${tx.id}')">${icon("trash", 15)} 削除</button>
+          <button class="kb-outline-btn" style="flex:1;justify-content:center" onclick="C.editTx('${tx.id}')">${icon("edit", 15)} 編集</button>
+          ${tx.type !== "transfer" ? `<button class="kb-outline-btn" style="flex:1;justify-content:center" onclick="C.copyTx('${tx.id}')">${icon("copy", 15)} コピー</button>` : ""}
         </div>
+        <button class="kb-danger-btn" style="width:100%;margin-top:8px" onclick="C.deleteTxConfirm('${tx.id}')">${icon("trash", 15)} 削除</button>
       </div>
     </div>`);
 }
@@ -531,12 +610,20 @@ function recurringSourceLabel(r) {
   const acc = getAccount(r.accountId);
   return acc ? acc.name : "?";
 }
+function recurringIntervalLabel(r) {
+  const n = r.intervalMonths || 1;
+  if (n === 1) return "毎月";
+  if (n === 2) return "隔月";
+  if (n === 12) return "1年ごと";
+  return `${n}ヶ月ごと`;
+}
 function materializeRecurringExpenses() {
   const nowKey = currentMonthKey();
   let changed = false;
   data.recurringExpenses.forEach((r) => {
     const end = r.endMonth && r.endMonth < nowKey ? r.endMonth : nowKey;
     monthRangeInclusive(r.startMonth, end).forEach((mk) => {
+      if (!recurringOccursInMonth(r, mk)) return;
       const exists = data.transactions.some((t) => t.recurringId === r.id && monthKeyOf(t.date) === mk);
       if (!exists) {
         data.transactions.push({
@@ -555,7 +642,10 @@ function activeRecurringMonthlyTotal() {
   const nowKey = currentMonthKey();
   return data.recurringExpenses
     .filter((r) => r.startMonth <= nowKey && (!r.endMonth || r.endMonth >= nowKey))
-    .reduce((s, r) => s + (r.type === "income" ? r.amount : -r.amount), 0);
+    .reduce((s, r) => {
+      const monthlyEquivalent = r.amount / (r.intervalMonths || 1);
+      return s + (r.type === "income" ? monthlyEquivalent : -monthlyEquivalent);
+    }, 0);
 }
 function projectedNetWorth(targetMonth) {
   let total = netWorth();
@@ -564,8 +654,7 @@ function projectedNetWorth(targetMonth) {
   const months = monthRangeInclusive(nextMonthKeyOf(nowKey), targetMonth);
   data.recurringExpenses.forEach((r) => {
     months.forEach((mk) => {
-      if (mk < r.startMonth) return;
-      if (r.endMonth && mk > r.endMonth) return;
+      if (!recurringOccursInMonth(r, mk)) return;
       total += r.type === "income" ? r.amount : -r.amount;
     });
   });
@@ -602,8 +691,7 @@ function projectedAccountBalance(accountId, targetMonth) {
     const resolvedAcc = r.cardId ? ((getCard(r.cardId) || {}).linkedAccountId) : r.accountId;
     if (resolvedAcc !== accountId) return;
     months.forEach((mk) => {
-      if (mk < r.startMonth) return;
-      if (r.endMonth && mk > r.endMonth) return;
+      if (!recurringOccursInMonth(r, mk)) return;
       bal += r.type === "income" ? r.amount : -r.amount;
     });
   });
@@ -619,6 +707,12 @@ function accountValueAtMonth(accountId, mk) {
 
 /* ---------- mutations ---------- */
 function addTransaction(tx) { data.transactions.push({ id: uid(), ...tx }); saveState(); }
+function updateTransaction(id, patch) {
+  const idx = data.transactions.findIndex((t) => t.id === id);
+  if (idx === -1) return;
+  data.transactions[idx] = { ...data.transactions[idx], ...patch };
+  saveState();
+}
 function deleteTransaction(id) { data.transactions = data.transactions.filter((t) => t.id !== id); saveState(); renderApp(); }
 function addAccountRecord(acc) { data.accounts.push({ id: uid(), ...acc }); saveState(); }
 function addCardRecord(card) { data.cards.push({ id: uid(), ...card }); saveState(); }
@@ -716,20 +810,20 @@ function importBackupFile(file) {
 }
 
 /* ---------- chart SVGs ---------- */
-function composedChartSVG(stats) {
-  const w = 760, h = 300, padL = 50, padR = 50, padT = 16, padB = 30;
-  const plotW = w - padL - padR, plotH = h - padT - padB;
-  const n = stats.length, groupW = plotW / n;
+function timelineChartSVG(stats, colWidth) {
+  const h = 260, padT = 14, padB = 26;
+  const plotH = h - padT - padB;
+  const w = stats.length * colWidth;
   const maxRight = Math.max(1, ...stats.map((s) => Math.max(s.income, s.expense)));
   const maxLeftAbs = Math.max(1, ...stats.map((s) => Math.abs(s.net)));
   const yRight = (v) => padT + plotH - (v / maxRight) * plotH;
   const yLeft = (v) => padT + plotH / 2 - (v / maxLeftAbs) * (plotH / 2);
-  const barW = groupW * 0.3;
-  let bars = "", xlabels = "";
+  const barW = colWidth * 0.3;
+  let bars = "", xlabels = "", hitRects = "";
   const linePoints = [];
   const firstProjectedIdx = stats.findIndex((s) => s.projected);
   stats.forEach((s, i) => {
-    const cx = padL + groupW * i + groupW / 2;
+    const cx = i * colWidth + colWidth / 2;
     const xIncome = cx - barW - 2, xExpense = cx + 2;
     const baseline = yRight(0);
     const yInc = yRight(s.income), yExp = yRight(s.expense);
@@ -738,42 +832,35 @@ function composedChartSVG(stats) {
     bars += `<rect x="${xExpense.toFixed(1)}" y="${yExp.toFixed(1)}" width="${barW.toFixed(1)}" height="${(baseline - yExp).toFixed(1)}" fill="#D97757" rx="3"${op}/>`;
     linePoints.push([cx, yLeft(s.net), !!s.projected]);
     xlabels += `<text x="${cx.toFixed(1)}" y="${h - 8}" font-size="10" fill="${s.projected ? "#8A9BA8" : "#5D7688"}" text-anchor="middle">${s.label}</text>`;
+    hitRects += `<rect class="kb-tl-hit" data-month="${s.month}" x="${(i * colWidth).toFixed(1)}" y="0" width="${colWidth}" height="${h}" fill="transparent"/>`;
   });
-  // split the net line into a solid (actual) segment and a dashed (projected) segment
   let solidPath = "", dashedPath = "";
   linePoints.forEach((p, i) => {
     const seg = (i === 0 ? "M" : "L") + p[0].toFixed(1) + "," + p[1].toFixed(1) + " ";
     if (p[2]) dashedPath += seg; else solidPath += seg;
     if (i > 0 && !linePoints[i - 1][2] && p[2]) {
-      // bridge the join point so the dashed segment connects smoothly to the solid one
       dashedPath = "M" + linePoints[i - 1][0].toFixed(1) + "," + linePoints[i - 1][1].toFixed(1) + " " + dashedPath;
     }
   });
   let grid = "";
-  for (let i = 0; i <= 4; i++) { const y = padT + (plotH / 4) * i; grid += `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="#DCE7E9" stroke-width="1"/>`; }
-  const leftLabels = `
-    <text x="${padL - 8}" y="${yLeft(maxLeftAbs) + 4}" font-size="10" fill="#16324F" text-anchor="end">${formatYenShort(maxLeftAbs)}</text>
-    <text x="${padL - 8}" y="${yLeft(0) + 4}" font-size="10" fill="#16324F" text-anchor="end">0</text>
-    <text x="${padL - 8}" y="${yLeft(-maxLeftAbs) + 4}" font-size="10" fill="#16324F" text-anchor="end">-${formatYenShort(maxLeftAbs)}</text>`;
-  const rightLabels = `
-    <text x="${w - padR + 8}" y="${yRight(maxRight) + 4}" font-size="10" fill="#5D7688">${formatYenShort(maxRight)}</text>
-    <text x="${w - padR + 8}" y="${yRight(0) + 4}" font-size="10" fill="#5D7688">0</text>`;
+  for (let i = 0; i <= 4; i++) { const y = padT + (plotH / 4) * i; grid += `<line x1="0" y1="${y}" x2="${w}" y2="${y}" stroke="#DCE7E9" stroke-width="1"/>`; }
   let separator = "";
   if (firstProjectedIdx > 0) {
-    const bx = padL + groupW * firstProjectedIdx;
+    const bx = firstProjectedIdx * colWidth;
     separator = `
       <line x1="${bx.toFixed(1)}" y1="${padT}" x2="${bx.toFixed(1)}" y2="${padT + plotH}" stroke="#16324F" stroke-dasharray="2 3" stroke-width="1" opacity="0.45"/>
       <text x="${(bx + 4).toFixed(1)}" y="${padT + 11}" font-size="9.5" fill="#8A9BA8">予測 →</text>`;
   }
-  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;display:block;">
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block" id="timelineSvg">
     ${grid}
-    <line x1="${padL}" y1="${yLeft(0)}" x2="${w - padR}" y2="${yLeft(0)}" stroke="#5D7688" stroke-dasharray="4 4"/>
+    <line x1="0" y1="${yLeft(0)}" x2="${w}" y2="${yLeft(0)}" stroke="#5D7688" stroke-dasharray="4 4"/>
     ${bars}
     ${separator}
     <path d="${solidPath}" fill="none" stroke="#16324F" stroke-width="2.75"/>
     ${dashedPath ? `<path d="${dashedPath}" fill="none" stroke="#16324F" stroke-width="2.75" stroke-dasharray="5 4"/>` : ""}
     ${linePoints.map((p) => `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="#16324F"${p[2] ? ' fill-opacity="0.55"' : ""}/>`).join("")}
-    ${xlabels}${leftLabels}${rightLabels}
+    ${xlabels}
+    ${hitRects}
   </svg>`;
 }
 function categoryBarChartSVG(series, color) {
@@ -875,7 +962,7 @@ function renderHomeTab() {
           ${r.category ? `<span class="kb-tx-cat" style="background:${hashColor(r.category, CATEGORY_PALETTE)}">${escapeHtml(r.category)}</span>` : ""}
           <span class="kb-tx-cat" style="background:${isIncome ? "var(--mint-deep)" : "var(--coral)"}">${isIncome ? "収入" : "支出"}</span>
           <b style="color:var(--navy)">${escapeHtml(r.name)}</b>　${formatYen(r.amount)}${isActive ? "" : `<span style="color:var(--ink-soft)">（現在は対象外）</span>`}
-          <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">${escapeHtml(recurringSourceLabel(r))}／${period}</div>
+          <div style="font-size:11px;color:var(--ink-soft);margin-top:3px">${escapeHtml(recurringSourceLabel(r))}／${recurringIntervalLabel(r)}／${period}</div>
         </span>
         <button onclick="event.stopPropagation();C.deleteRecurringConfirm('${r.id}')">${icon("trash", 14)}</button>
       </div>`;
@@ -907,7 +994,7 @@ function renderHomeTab() {
     </div>
     <div class="kb-panel" style="margin-bottom:0">
       <div class="kb-panel-title"><span class="kb-panel-icon coral">${icon("calendar", 15)}</span><h2>固定費・固定収入</h2></div>
-      <div class="kb-hint" style="margin-top:-2px">現在有効な固定費の合計：${formatYen(activeRecurringMonthlyTotal())}／月　タップで内容を編集できます</div>
+      <div class="kb-hint" style="margin-top:-2px">現在有効な固定費の月あたり換算：${formatYen(activeRecurringMonthlyTotal())}　タップで内容を編集できます</div>
       ${data.recurringExpenses.length === 0 ? `<div class="kb-empty">登録された固定費・固定収入はありません</div>` : recurringRows}
       <button class="kb-add-btn" style="margin-top:10px" ${data.accounts.length === 0 ? "disabled" : ""} onclick="C.openRecurringModal()">${icon("plus", 14)} 固定費・固定収入を追加</button>
     </div>`;
@@ -917,7 +1004,6 @@ function renderHomeTab() {
 function renderRecordTab() {
   const years = availableYears();
   if (!ui.graphCenterMonth) ui.graphCenterMonth = currentMonthKey();
-  const stats = windowMonthlyStats(ui.graphCenterMonth);
   const cats = ui.catViewType === "expense" ? data.expenseCats : data.incomeCats;
   if (!cats.includes(ui.catViewCategory)) ui.catViewCategory = cats[0] || "";
   const catSeries = categoryYearSeries(ui.recordYear, ui.catViewType, ui.catViewCategory);
@@ -925,20 +1011,19 @@ function renderRecordTab() {
   const allTx = sortedTransactions();
   const tx = ui.txFilterMode === "month" ? allTx.filter((t) => monthKeyOf(t.date) === ui.txFilterMonth) : allTx;
 
+  const COL_WIDTH = 56;
   const chartBlock = ui.graphMode === "all"
-    ? `<div class="kb-chart-box kb-swipe-area" id="graphSwipeArea">
-         <div id="graphSwipeTrack" class="kb-swipe-track">
-           <div class="kb-chart-label">左目盛り：収支（折れ線）／ 右目盛り：入金・出費（棒）　${monthDisplayLabel(addMonths(ui.graphCenterMonth, -5))} 〜 ${monthDisplayLabel(addMonths(ui.graphCenterMonth, 6))}</div>
-           ${composedChartSVG(stats)}
-           <div class="kb-chart-legend">
-             <span><i class="kb-legend-dot" style="background:#4FBE8D"></i>入金</span>
-             <span><i class="kb-legend-dot" style="background:#D97757"></i>出費</span>
-             <span><i class="kb-legend-dot" style="background:#16324F"></i>収支（左目盛り）</span>
-             <span><i class="kb-legend-dot" style="background:#8A9BA8"></i>薄い部分は固定費・固定収入からの予測</span>
-           </div>
+    ? `<div class="kb-chart-box">
+         <div class="kb-chart-label" id="graphCenterLabel">左目盛り：収支（折れ線）／ 右目盛り：入金・出費（棒）　${monthDisplayLabel(ui.graphCenterMonth)}を表示中</div>
+         <div class="kb-timeline-scroll" id="graphScrollArea">${timelineChartSVG(timelineMonthlyStats(), COL_WIDTH)}</div>
+         <div class="kb-chart-legend">
+           <span><i class="kb-legend-dot" style="background:#4FBE8D"></i>入金</span>
+           <span><i class="kb-legend-dot" style="background:#D97757"></i>出費</span>
+           <span><i class="kb-legend-dot" style="background:#16324F"></i>収支（左目盛り）</span>
+           <span><i class="kb-legend-dot" style="background:#8A9BA8"></i>薄い部分は固定費・固定収入からの予測</span>
          </div>
        </div>
-       <div class="kb-hint" style="margin:6px 2px 0">左右にスワイプ、または月を選んで表示範囲を移動できます</div>`
+       <div class="kb-hint" style="margin:6px 2px 0">左右にスクロールで移動、月をタップすると詳細、カーソルを合わせると金額を表示します</div>`
     : `<div class="kb-chart-box">
          <div class="kb-chart-label">${escapeHtml(ui.catViewCategory || "カテゴリ未選択")}（${ui.recordYear}年 月別）</div>
          ${categoryBarChartSVG(catSeries, hashColor(ui.catViewCategory || "その他", CATEGORY_PALETTE))}
@@ -947,7 +1032,7 @@ function renderRecordTab() {
   const txHtml = tx.length === 0 ? `<div class="kb-empty">${ui.txFilterMode === "month" ? "この月の記録はありません。" : "記録がありません。ホームタブのボタンから追加しましょう。"}</div>` : `
     <div class="kb-txlist">
       ${tx.map((t) => `
-        <div class="kb-tx-row" onclick="C.txRowTap(event, '${t.id}')">
+        <div class="kb-tx-row" data-tx-id="${t.id}" onclick="C.txRowTap(event, '${t.id}')">
           <div class="kb-tx-mark" style="background:${t.type === "expense" ? "var(--coral)" : t.type === "income" ? "var(--mint)" : "var(--wash)"}"></div>
           <div class="kb-tx-date">${t.date.slice(5).replace("-", "/")}</div>
           <div class="kb-tx-mid">
@@ -969,7 +1054,7 @@ function renderRecordTab() {
         <button class="kb-tabbtn ${ui.graphMode === "all" ? "active" : ""}" onclick="C.setGraphMode('all')">全カテゴリ</button>
         <button class="kb-tabbtn ${ui.graphMode === "byCategory" ? "active" : ""}" onclick="C.setGraphMode('byCategory')">カテゴリ別</button>
         ${ui.graphMode === "all"
-          ? `<input type="month" class="kb-select" value="${ui.graphCenterMonth}" onchange="C.setGraphCenterMonth(this.value)" />`
+          ? `<input type="month" class="kb-select" id="graphMonthPicker" value="${ui.graphCenterMonth}" onchange="C.setGraphCenterMonth(this.value)" />`
           : `<select class="kb-select" onchange="C.setRecordYear(this.value)">
                ${years.map((y) => `<option value="${y}" ${y === ui.recordYear ? "selected" : ""}>${y}年</option>`).join("")}
              </select>
@@ -1037,10 +1122,14 @@ function renderOtherTab() {
       ${data.cards.length ? `<div style="height:8px"></div>${cardRows}` : ""}
     </div>
     <div class="kb-panel">
-      <div class="kb-panel-title"><span class="kb-panel-icon">${icon(drive.connected ? "cloud" : "cloudOff", 15)}</span><h2>クラウド同期（Google Drive）</h2></div>
+      <div class="kb-panel-title"><span class="kb-panel-icon ${drive.needsReauth ? "coral" : ""}">${icon(drive.needsReauth ? "cloudOff" : drive.connected ? "cloud" : "cloudOff", 15)}</span><h2>クラウド同期（Google Drive）</h2></div>
       ${ui.driveStatusMsg ? `<div class="kb-status ${ui.driveStatusMsg.type}">${escapeHtml(ui.driveStatusMsg.text)}</div>` : ""}
       ${!driveConfigured() ? `
         <div class="kb-hint" style="margin-top:-2px">READMEの手順でGoogle Cloud ConsoleのOAuthクライアントIDを取得し、app.js内のCONFIG.GOOGLE_CLIENT_IDに設定すると使えるようになります。</div>
+      ` : drive.needsReauth ? `
+        <div class="kb-status error">Googleとの連携の有効期限が切れています。自動保存が停止中です。</div>
+        <button class="kb-submit" style="background:var(--coral)" ${drive.busy ? "disabled" : ""} onclick="C.connectDrive()">${icon("cloud", 15)} 再度ログインする</button>
+        <button class="kb-outline-btn" style="margin-top:10px" onclick="C.disconnectDrive()">連携を解除する</button>
       ` : drive.connected ? `
         <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:10px">
           接続済み${drive.lastSync ? `／最終同期：${new Date(drive.lastSync).toLocaleString("ja-JP")}` : ""}${drive.busy ? "／同期中…" : ""}
@@ -1096,73 +1185,195 @@ function renderBottomNav() {
 }
 
 /* ---------- master render ---------- */
+let tabScrollY = { home: 0, record: 0, other: 0 };
+let suppressScrollCapture = false;
 function renderApp() {
+  if (!suppressScrollCapture) {
+    tabScrollY[ui.activeTab] = window.scrollY;
+  }
+  suppressScrollCapture = false;
   const app = document.getElementById("app");
   let body = "";
   if (ui.activeTab === "home") body = renderHomeTab();
   else if (ui.activeTab === "record") body = renderRecordTab();
   else body = renderOtherTab();
-  app.innerHTML = renderHeader() + `<div>${body}</div>` + renderBottomNav();
+  app.innerHTML = renderHeader() + `<div>${body}</div>` + renderScrollTopButton() + renderBottomNav();
   if (ui.activeTab === "home") setupReorder();
+  const hadPendingScroll = !!pendingScrollTxId;
   if (ui.activeTab === "record") {
     setupSwipe("txSwipeArea", "txSwipeTrack", () => ui.txFilterMode === "month", (dir) => shiftTxFilterMonth(dir));
-    setupSwipe("graphSwipeArea", "graphSwipeTrack", () => ui.graphMode === "all", (dir) => shiftGraphCenterMonth(dir));
+    setupTimelineChart();
+    scrollToPendingTx();
   }
+  if (!hadPendingScroll) {
+    const targetY = tabScrollY[ui.activeTab] || 0;
+    requestAnimationFrame(() => window.scrollTo(0, targetY));
+  }
+}
+function renderScrollTopButton() {
+  return `<button id="scrollTopBtn" class="kb-scrolltop" onclick="C.scrollToTopTap()" title="上へ戻る">${icon("chevronUp", 20)}</button>`;
+}
+function scrollToTopTap() {
+  tabScrollY[ui.activeTab] = 0;
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+let scrollTopListenerAttached = false;
+function attachScrollTopVisibilityListener() {
+  if (scrollTopListenerAttached) return;
+  scrollTopListenerAttached = true;
+  window.addEventListener("scroll", () => {
+    const btn = document.getElementById("scrollTopBtn");
+    if (!btn) return;
+    btn.classList.toggle("visible", window.scrollY > 240);
+  }, { passive: true });
 }
 
 /* ---------- generic horizontal swipe-to-navigate (drag-follow + slide, Android-safe) ---------- */
+/* Only engages once real horizontal intent is confirmed, so plain taps on rows/buttons
+   inside the swipe area are never intercepted. */
 function setupSwipe(areaId, trackId, isEnabled, onCommit) {
   const area = document.getElementById(areaId);
   const track = document.getElementById(trackId);
   if (!area || !track) return;
-  let sx = 0, sy = 0, dx = 0, dragging = false, bailed = false;
+  let sx = 0, sy = 0, dx = 0, axis = null; // axis: null | "pending" | "horizontal" | "vertical"
 
   function onDown(e) {
     if (!isEnabled()) return;
-    sx = e.clientX; sy = e.clientY; dx = 0; dragging = true; bailed = false;
-    track.style.transition = "none";
-    try { area.setPointerCapture(e.pointerId); } catch (err) { /* not supported */ }
+    sx = e.clientX; sy = e.clientY; dx = 0; axis = "pending";
   }
   function onMove(e) {
-    if (!dragging || bailed) return;
-    dx = e.clientX - sx;
-    const dy = e.clientY - sy;
-    if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 18) {
-      // vertical intent - let the page scroll, abandon the swipe
-      bailed = true; dragging = false;
-      track.style.transition = "transform 0.15s ease";
-      track.style.transform = "translateX(0px)";
-      return;
+    if (axis === null) return;
+    const ndx = e.clientX - sx, ndy = e.clientY - sy;
+    if (axis === "pending") {
+      if (Math.abs(ndy) > 10 && Math.abs(ndy) > Math.abs(ndx)) { axis = "vertical"; return; }
+      if (Math.abs(ndx) > 10) {
+        axis = "horizontal";
+        track.style.transition = "none";
+        try { area.setPointerCapture(e.pointerId); } catch (err) { /* not supported */ }
+      } else {
+        return;
+      }
     }
+    if (axis !== "horizontal") return;
+    dx = ndx;
     track.style.transform = `translateX(${dx}px)`;
   }
   function onEnd() {
-    if (!dragging) return;
-    dragging = false;
-    const w = area.clientWidth || 300;
-    track.style.transition = "transform 0.2s ease";
-    if (Math.abs(dx) > Math.max(50, w * 0.18)) {
-      const dir = dx < 0 ? 1 : -1;
-      track.style.transform = `translateX(${dx < 0 ? -w : w}px)`;
-      setTimeout(() => onCommit(dir), 170);
-    } else {
-      track.style.transform = "translateX(0px)";
+    if (axis === "horizontal") {
+      const w = area.clientWidth || 300;
+      track.style.transition = "transform 0.2s ease";
+      if (Math.abs(dx) > Math.max(50, w * 0.18)) {
+        const dir = dx < 0 ? 1 : -1;
+        track.style.transform = `translateX(${dx < 0 ? -w : w}px)`;
+        setTimeout(() => onCommit(dir), 170);
+      } else {
+        track.style.transform = "translateX(0px)";
+      }
     }
+    axis = null;
   }
   area.addEventListener("pointerdown", onDown);
   area.addEventListener("pointermove", onMove);
   area.addEventListener("pointerup", onEnd);
   area.addEventListener("pointercancel", onEnd);
 }
+const TIMELINE_COL_WIDTH = 56;
+let pendingScrollTxId = null;
+function scrollToPendingTx() {
+  if (!pendingScrollTxId) return;
+  const id = pendingScrollTxId;
+  pendingScrollTxId = null;
+  const el = document.querySelector(`[data-tx-id="${id}"]`);
+  if (!el) return;
+  el.scrollIntoView({ block: "center", behavior: "auto" });
+  el.classList.add("kb-flash");
+  setTimeout(() => el.classList.remove("kb-flash"), 1200);
+  setTimeout(() => { tabScrollY[ui.activeTab] = window.scrollY; }, 50);
+}
+function setupTimelineChart() {
+  const area = document.getElementById("graphScrollArea");
+  const svg = document.getElementById("timelineSvg");
+  if (!area || !svg) return;
+  const stats = timelineMonthlyStats();
+  const idx = stats.findIndex((s) => s.month === ui.graphCenterMonth);
+  const centerIdx = idx === -1 ? Math.floor(stats.length / 2) : idx;
+  area.scrollLeft = Math.max(0, centerIdx * TIMELINE_COL_WIDTH + TIMELINE_COL_WIDTH / 2 - area.clientWidth / 2);
+
+  let scrollTimer = null;
+  area.addEventListener("scroll", () => {
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => {
+      const centerX = area.scrollLeft + area.clientWidth / 2;
+      let i = Math.floor(centerX / TIMELINE_COL_WIDTH);
+      i = Math.max(0, Math.min(stats.length - 1, i));
+      const mk = stats[i].month;
+      ui.graphCenterMonth = mk;
+      const label = document.getElementById("graphCenterLabel");
+      if (label) label.textContent = `左目盛り：収支（折れ線）／ 右目盛り：入金・出費（棒）　${monthDisplayLabel(mk)}を表示中`;
+      const picker = document.getElementById("graphMonthPicker");
+      if (picker) picker.value = mk;
+    }, 120);
+  });
+  svg.addEventListener("click", (e) => {
+    const rect = e.target.closest(".kb-tl-hit");
+    if (!rect) return;
+    openGraphMonthDetail(rect.dataset.month);
+  });
+  svg.addEventListener("pointermove", (e) => {
+    const rect = e.target.closest(".kb-tl-hit");
+    if (!rect) { hideChartTooltip(); return; }
+    const mo = stats.find((s) => s.month === rect.dataset.month);
+    if (mo) showChartTooltip(e.clientX, e.clientY, mo);
+  });
+  svg.addEventListener("pointerleave", hideChartTooltip);
+}
+function showChartTooltip(x, y, mo) {
+  let tip = document.getElementById("chartTooltip");
+  if (!tip) {
+    tip = document.createElement("div");
+    tip.id = "chartTooltip";
+    tip.className = "kb-chart-tooltip";
+    document.body.appendChild(tip);
+  }
+  tip.innerHTML = `<b>${monthDisplayLabel(mo.month)}</b>${mo.projected ? "（予測）" : ""}<br/>入金：${formatYen(mo.income)}<br/>出費：${formatYen(mo.expense)}<br/>収支：${formatYen(mo.net)}`;
+  tip.style.left = `${x + 14}px`;
+  tip.style.top = `${y + 14}px`;
+  tip.style.display = "block";
+}
+function hideChartTooltip() {
+  const tip = document.getElementById("chartTooltip");
+  if (tip) tip.style.display = "none";
+}
+function openGraphMonthDetail(mk) {
+  const mo = timelineMonthlyStats().find((s) => s.month === mk);
+  if (!mo) return;
+  mountModal(`
+    <div class="kb-modal-backdrop">
+      <div class="kb-modal" onclick="event.stopPropagation()">
+        <button class="kb-modal-close" onclick="C.closeModal()">${icon("x", 18)}</button>
+        <h3>${monthDisplayLabel(mk)}${mo.projected ? "の予測" : ""}</h3>
+        <div class="kb-cat-manage-row"><span>入金</span><span class="kb-num" style="color:var(--mint-deep)">${formatYen(mo.income)}</span></div>
+        <div class="kb-cat-manage-row"><span>出費</span><span class="kb-num" style="color:var(--coral)">${formatYen(mo.expense)}</span></div>
+        <div class="kb-cat-manage-row" style="background:var(--wash-soft);border:none"><span style="font-weight:700;color:var(--navy)">収支</span><span class="kb-num" style="color:var(--navy)">${formatYen(mo.net)}</span></div>
+        ${!mo.projected
+          ? `<button class="kb-outline-btn" style="width:100%;justify-content:center;margin-top:10px" onclick="C.viewMonthHistory('${mk}')">${icon("transfer", 15)} この月の履歴を見る</button>`
+          : `<div class="kb-hint" style="margin-top:10px">固定費・固定収入から算出した見込みです。</div>`}
+      </div>
+    </div>`);
+}
+function viewMonthHistory(mk) {
+  closeModal();
+  ui.txFilterMode = "month";
+  ui.txFilterMonth = mk;
+  ui.graphCenterMonth = mk;
+  renderApp();
+}
 function shiftTxFilterMonth(delta) {
   ui.txFilterMonth = addMonths(ui.txFilterMonth || currentMonthKey(), delta);
   ui.graphCenterMonth = ui.txFilterMonth;
   renderApp();
 }
-function shiftGraphCenterMonth(delta) {
-  ui.graphCenterMonth = addMonths(ui.graphCenterMonth || currentMonthKey(), delta);
-  renderApp();
-}
+
 
 /* ---------- long-press grid reorder (2D: for both list and grid layouts) ---------- */
 let dragSession = { id: null, kind: null, timer: null, active: false, startX: 0, startY: 0 };
@@ -1436,7 +1647,11 @@ function openRecurringModal(existingId) {
   let accountId = (existing && existing.accountId) || data.accounts[0].id;
   let cardId = (existing && existing.cardId) || "";
   let hasEnd = !!(existing && existing.endMonth);
+  let interval = existing ? (existing.intervalMonths || 1) : 1;
   const nowKey = currentMonthKey();
+  const INTERVAL_PRESETS = [
+    [1, "毎月"], [2, "隔月（2ヶ月ごと）"], [3, "3ヶ月ごと"], [6, "半年ごと"], [12, "1年ごと"],
+  ];
 
   function cats() { return type === "expense" ? data.expenseCats : data.incomeCats; }
   function typeChipsHtml() {
@@ -1446,6 +1661,11 @@ function openRecurringModal(existingId) {
   }
   function catChipsHtml() {
     return cats().map((c) => `<div class="kb-chip ${category === c ? "active" : ""}" data-cat="${escapeHtml(c)}">${escapeHtml(c)}</div>`).join("");
+  }
+  function intervalChipsHtml() {
+    const isPreset = INTERVAL_PRESETS.some(([n]) => n === interval);
+    return INTERVAL_PRESETS.map(([n, label]) => `<div class="kb-chip ${interval === n ? "active" : ""}" data-interval="${n}">${label}</div>`).join("")
+      + `<div class="kb-chip ${!isPreset ? "active" : ""}" data-interval="custom">その他</div>`;
   }
   function sourceTypeChipsHtml() {
     return `
@@ -1458,6 +1678,7 @@ function openRecurringModal(existingId) {
     }
     return `<select id="recCardSelect"><option value="">選択してください</option>${data.cards.map((c) => `<option value="${c.id}" ${c.id === cardId ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}</select>`;
   }
+  function isCustomInterval() { return !INTERVAL_PRESETS.some(([n]) => n === interval); }
 
   mountModal(`
     <div class="kb-modal-backdrop">
@@ -1466,7 +1687,10 @@ function openRecurringModal(existingId) {
         <h3 style="color:var(--coral)">${existing ? "固定費・固定収入を編集" : "固定費・固定収入を追加"}</h3>
         <div class="kb-field"><label>種類</label><div class="kb-chip-group" id="recTypeChips">${typeChipsHtml()}</div></div>
         <div class="kb-field"><label>名前</label><input type="text" id="recName" placeholder="例：家賃、〇〇サブスク、家賃収入" value="${escapeHtml(existing ? existing.name : "")}" /></div>
-        <div class="kb-field"><label>金額（月あたり）</label><input type="text" inputmode="numeric" id="recAmount" placeholder="0" value="${existing ? Number(existing.amount).toLocaleString("ja-JP") : ""}" oninput="formatAmountInput(this)" /></div>
+        <div class="kb-field"><label>金額（1回あたり）</label><input type="text" inputmode="numeric" id="recAmount" placeholder="0" value="${existing ? Number(existing.amount).toLocaleString("ja-JP") : ""}" oninput="formatAmountInput(this)" /></div>
+        <div class="kb-field"><label>頻度</label><div class="kb-chip-group" id="recIntervalChips">${intervalChipsHtml()}</div>
+          <input type="number" min="1" id="recIntervalCustom" placeholder="例：4（4ヶ月ごと）" value="${isCustomInterval() ? interval : ""}" style="margin-top:8px;display:${isCustomInterval() ? "block" : "none"}" />
+        </div>
         <div class="kb-field"><label>カテゴリ</label><div class="kb-chip-group" id="recCatChips">${catChipsHtml()}</div></div>
         <div class="kb-field" id="recSourceWrap">
           <label id="recSourceLabel">${type === "income" ? "入金先" : "支払い元"}</label>
@@ -1498,6 +1722,22 @@ function openRecurringModal(existingId) {
     document.getElementById("recCatChips").innerHTML = catChipsHtml();
     refreshSourceSection();
   });
+  document.getElementById("recIntervalChips").addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-interval]"); if (!chip) return;
+    if (chip.dataset.interval === "custom") {
+      interval = interval && !INTERVAL_PRESETS.some(([n]) => n === interval) ? interval : 4;
+      document.getElementById("recIntervalCustom").style.display = "block";
+      document.getElementById("recIntervalCustom").value = interval;
+    } else {
+      interval = Number(chip.dataset.interval);
+      document.getElementById("recIntervalCustom").style.display = "none";
+    }
+    document.getElementById("recIntervalChips").innerHTML = intervalChipsHtml();
+  });
+  document.getElementById("recIntervalCustom").addEventListener("input", (e) => {
+    const v = Number(e.target.value);
+    if (v >= 1) interval = v;
+  });
   document.getElementById("recCatChips").addEventListener("click", (e) => {
     const chip = e.target.closest("[data-cat]"); if (!chip) return;
     category = chip.dataset.cat;
@@ -1519,6 +1759,7 @@ function openRecurringModal(existingId) {
     if (!name || !amount || amount <= 0) return;
     const startMonth = document.getElementById("recStart").value || nowKey;
     const endMonth = hasEnd ? (document.getElementById("recEnd").value || null) : null;
+    const intervalMonths = Math.max(1, Math.round(interval) || 1);
     let recAccountId = null, recCardId = null;
     if (sourceType === "card" && type === "expense") {
       recCardId = document.getElementById("recCardSelect").value;
@@ -1527,7 +1768,7 @@ function openRecurringModal(existingId) {
       recAccountId = document.getElementById("recAccountSelect").value;
       if (!recAccountId) return;
     }
-    const payload = { type, name, amount, category: category || null, accountId: recAccountId, cardId: recCardId, startMonth, endMonth };
+    const payload = { type, name, amount, category: category || null, accountId: recAccountId, cardId: recCardId, startMonth, endMonth, intervalMonths };
     if (existing) updateRecurringExpense(existing.id, payload);
     else addRecurringExpense(payload);
     closeModal();
@@ -1607,14 +1848,17 @@ function openTxModal(mode, presetAccountId, prefill) {
       <div class="kb-field"><label>日付</label><input type="date" id="txDate" value="${prefill.date || todayStr()}" /></div>
       ${categorySection}
       ${sourceSection}
-      <button class="kb-submit" id="txSubmitBtn" style="background:${accentMap[mode]}">記録する</button>`;
+      <button class="kb-submit" id="txSubmitBtn" style="background:${accentMap[mode]}">${prefill.editId ? "更新する" : "記録する"}</button>`;
   }
+
+  const editTitleMap = { expense: "出費を編集", income: "入金を編集", transfer: "資金移動を編集" };
+  const modalTitle = prefill.editId ? editTitleMap[mode] : titleMap[mode] + (prefill.amount != null ? "（コピー）" : "");
 
   mountModal(`
     <div class="kb-modal-backdrop">
       <div class="kb-modal" onclick="event.stopPropagation()">
         <button class="kb-modal-close" onclick="C.closeModal()">${icon("x", 18)}</button>
-        <h3 style="color:${accentMap[mode]}">${titleMap[mode]}${prefill.amount != null ? "（コピー）" : ""}</h3>
+        <h3 style="color:${accentMap[mode]}">${modalTitle}</h3>
         <div id="txModalBody">${bodyHtml()}</div>
       </div>
     </div>`);
@@ -1653,25 +1897,28 @@ function openTxModal(mode, presetAccountId, prefill) {
       const memo = document.getElementById("txMemo").value.trim();
       const date = document.getElementById("txDate").value || todayStr();
       const base = { date, amount, memo };
+      let payload = null;
       if (mode === "transfer") {
         const from = document.getElementById("txFromAccount").value;
         const to = document.getElementById("txToAccount").value;
         if (!from || !to || from === to) return;
-        addTransaction({ ...base, type: "transfer", accountId: from, toAccountId: to });
+        payload = { ...base, type: "transfer", accountId: from, toAccountId: to };
       } else if (mode === "expense") {
         if (sourceType === "card") {
           if (!cardId) return;
-          addTransaction({ ...base, type: "expense", category: category || null, accountId: null, cardId });
+          payload = { ...base, type: "expense", category: category || null, accountId: null, cardId };
         } else {
           const accId = document.getElementById("txAccountSelect").value;
           if (!accId) return;
-          addTransaction({ ...base, type: "expense", category: category || null, accountId: accId, cardId: null });
+          payload = { ...base, type: "expense", category: category || null, accountId: accId, cardId: null };
         }
       } else {
         const accId = document.getElementById("txAccountSelect").value;
         if (!accId) return;
-        addTransaction({ ...base, type: "income", category: category || null, accountId: accId });
+        payload = { ...base, type: "income", category: category || null, accountId: accId };
       }
+      if (prefill.editId) updateTransaction(prefill.editId, payload);
+      else addTransaction(payload);
       closeModal();
       renderApp();
     });
@@ -1689,7 +1936,12 @@ function openTxModal(mode, presetAccountId, prefill) {
 
 /* ---------- global namespace for inline handlers ---------- */
 window.C = {
-  setTab(tab) { ui.activeTab = tab; renderApp(); },
+  setTab(tab) {
+    tabScrollY[ui.activeTab] = window.scrollY;
+    ui.activeTab = tab;
+    suppressScrollCapture = true;
+    renderApp();
+  },
   setRecordYear(y) { ui.recordYear = y; renderApp(); },
   setGraphMode(m) { ui.graphMode = m; renderApp(); },
   setCatViewType(t) { ui.catViewType = t; ui.catViewCategory = ""; renderApp(); },
@@ -1709,6 +1961,9 @@ window.C = {
   openAccountModal() { openAccountModal(); },
   islandTap(e, id) { islandTap(e, id); },
   dockTap(e, id) { dockTap(e, id); },
+  editTx(id) { editTx(id); },
+  scrollToTopTap() { scrollToTopTap(); },
+  viewMonthHistory(mk) { viewMonthHistory(mk); },
   netBadgeTap(e) { netBadgeTap(e); },
   copyTx(id) { copyTx(id); },
   openCardModal() { openCardModal(); },
@@ -1722,6 +1977,7 @@ window.C = {
   setGraphCenterMonth(v) { ui.graphCenterMonth = v; renderApp(); },
   connectDrive() { connectDrive(true); },
   disconnectDrive() { disconnectDrive(); },
+  closeReauthPrompt() { closeReauthPrompt(); },
   manualDriveUpload() { manualDriveUpload(); },
   manualDriveDownload() { manualDriveDownload(); },
   toggleDriveAutoSync() { toggleDriveAutoSync(); },
@@ -1739,4 +1995,5 @@ window.C = {
 loadData();
 materializeRecurringExpenses();
 renderApp();
+attachScrollTopVisibilityListener();
 if (window.__gisScriptLoaded) onGisReady();
